@@ -1,5 +1,6 @@
 use egui::Pos2;
 
+// <app mode>
 #[derive(Clone, PartialEq, Debug)]
 pub enum Mode {
     Idle,
@@ -9,7 +10,9 @@ pub enum Mode {
     CalibLen { p1: Pos2, p2: Pos2 },
     Segmented,
 }
+// </app mode>
 
+// <unit of measurement>
 #[derive(Clone, PartialEq)]
 pub enum Unit {
     Cm2,
@@ -24,7 +27,9 @@ impl Unit {
         match self { Unit::Cm2 => 1.0, Unit::Mm2 => 100.0 }
     }
 }
+// </unit of measurement>
 
+// <region data>
 #[derive(Clone)]
 pub struct Region {
     pub index: usize,
@@ -33,3 +38,4 @@ pub struct Region {
     pub avg_color: [u8; 3],
     pub centroid: (f32, f32),
 }
+// </region data>

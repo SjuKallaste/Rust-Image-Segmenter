@@ -5,47 +5,43 @@ use crate::imaging::build_seg_texture;
 use crate::types::Mode;
 use crate::ui::calib::{norm_to_screen, screen_to_norm};
 
+// <canvas panel>
 pub fn show(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
-    let tex_ref = if app.show_seg {
-        app.seg_tex.as_ref().or(app.orig_tex.as_ref())
-    } else {
-        app.orig_tex.as_ref()
-    };
+    let tex_ref = if app.show_seg { app.seg_tex.as_ref().or(app.orig_tex.as_ref()) } else { app.orig_tex.as_ref() };
 
     let tex = match tex_ref {
         None => {
             ui.centered_and_justified(|ui| {
-                ui.label(
-                    egui::RichText::new("No image loaded.\n\nClick  📂 Load Image  to begin.")
-                        .size(20.0)
-                        .color(egui::Color32::GRAY),
-                );
+                ui.label(egui::RichText::new("No image loaded.\n\nClick  📂 Load Image  to begin.").size(20.0).color(egui::Color32::GRAY));
             });
             return;
         }
         Some(t) => t,
     };
 
-    // Fit image into available space
+    // <fit image to panel>
     let avail = ui.available_size();
     let tex_size = tex.size_vec2();
     let fit = (avail.x / tex_size.x).min(avail.y / tex_size.y);
     let disp = tex_size * fit;
     let img_rect = Rect::from_center_size(ui.max_rect().center(), disp);
     app.img_rect = img_rect;
+    // </fit image to panel>
 
+    // <input sense and cursor>
     let sense = match &app.mode {
         Mode::CalibP1 | Mode::CalibP2 { .. } | Mode::Segmented => egui::Sense::click(),
         _ => egui::Sense::hover(),
     };
     let response = ui.allocate_rect(img_rect, sense);
-
     match &app.mode {
         Mode::CalibP1 | Mode::CalibP2 { .. } => ctx.set_cursor_icon(egui::CursorIcon::Crosshair),
         Mode::Segmented => ctx.set_cursor_icon(egui::CursorIcon::PointingHand),
         _ => {}
     }
+    // </input sense and cursor>
 
+    // <draw image or filter mask>
     let uv = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
     if !app.active_color_filters.is_empty() || app.imagej_mode {
         if let Some(cf_tex) = &app.color_filter_tex {
@@ -54,57 +50,65 @@ pub fn show(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
     } else {
         ui.painter().image(tex.id(), img_rect, uv, egui::Color32::WHITE);
     }
+    // </draw image or filter mask>
 
+    // <edge overlay>
     if app.show_edges {
         if let Some(et) = &app.edge_tex {
             ui.painter().image(et.id(), img_rect, uv, egui::Color32::WHITE);
         }
     }
+    // </edge overlay>
 
+    // <click handling>
     if response.clicked() {
         if let Some(pos) = response.interact_pointer_pos() {
             handle_click(app, ctx, pos, img_rect);
         }
     }
+    // </click handling>
 
     draw_calib_overlay(app, ui, img_rect);
 
+    // <region labels>
     if app.show_seg {
         let font = egui::FontId::proportional(14.0);
         let painter = ui.painter();
         for r in &app.regions {
-            let cx  = img_rect.min.x + r.centroid.0 * disp.x;
-            let cy  = img_rect.min.y + r.centroid.1 * disp.y;
+            let cx = img_rect.min.x + r.centroid.0 * disp.x;
+            let cy = img_rect.min.y + r.centroid.1 * disp.y;
             let lbl = r.index.to_string();
             painter.text(egui::pos2(cx+1.0, cy+1.0), egui::Align2::CENTER_CENTER, &lbl, font.clone(), egui::Color32::BLACK);
             painter.text(egui::pos2(cx, cy), egui::Align2::CENTER_CENTER, &lbl, font.clone(), egui::Color32::WHITE);
         }
     }
+    // </region labels>
 }
+// </canvas panel>
 
+// <click handler>
 fn handle_click(app: &mut App, ctx: &egui::Context, pos: Pos2, img_rect: Rect) {
     let norm = screen_to_norm(pos, img_rect);
-
     match app.mode.clone() {
         Mode::CalibP1 => {
-            app.mode   = Mode::CalibP2 { p1: norm };
+            app.mode = Mode::CalibP2 { p1: norm };
             app.status = "Now click the second endpoint.".into();
         }
         Mode::CalibP2 { p1 } => {
-            app.mode   = Mode::CalibLen { p1, p2: norm };
+            app.mode = Mode::CalibLen { p1, p2: norm };
             app.status = "Enter the length of this line in the toolbar above.".into();
         }
         Mode::Segmented => {
-            let px  = ((norm.x * app.img_w as f32) as usize).min(app.img_w as usize - 1);
-            let py  = ((norm.y * app.img_h as f32) as usize).min(app.img_h as usize - 1);
+            let px = ((norm.x * app.img_w as f32) as usize).min(app.img_w as usize - 1);
+            let py = ((norm.y * app.img_h as f32) as usize).min(app.img_h as usize - 1);
             if let Some(l) = app.label_map.get(py * app.img_w as usize + px).copied() {
                 if l >= 0 {
                     let ri = l as usize;
                     if app.selected.contains(&ri) { app.selected.remove(&ri); }
-                    else                          { app.selected.insert(ri);  }
-                    let n  = app.regions.len();
+                    else { app.selected.insert(ri); }
+                    let n = app.regions.len();
                     let ci = build_seg_texture(&app.label_map, app.img_w, app.img_h, n, &app.selected);
-                    app.seg_tex  = Some(ctx.load_texture("seg", ci, TextureOptions::default()));
+                    app.seg_tex = Some(ctx.load_texture("seg", ci, TextureOptions::default()));
                     app.show_seg = true;
                 }
             }
@@ -112,20 +116,18 @@ fn handle_click(app: &mut App, ctx: &egui::Context, pos: Pos2, img_rect: Rect) {
         _ => {}
     }
 }
+// </click handler>
 
+// <calibration overlay drawing>
 fn draw_calib_overlay(app: &App, ui: &mut egui::Ui, img_rect: Rect) {
     let painter = ui.painter();
-
     let dot = |p: Pos2| {
         let s = norm_to_screen(p, img_rect);
         painter.circle_filled(s, 7.0, egui::Color32::from_rgb(255, 215, 0));
         painter.circle_stroke(s, 7.0, egui::Stroke::new(2.0, egui::Color32::BLACK));
     };
-
     match &app.mode {
-        Mode::CalibP2 { p1 } => {
-            dot(*p1);
-        }
+        Mode::CalibP2 { p1 } => { dot(*p1); }
         Mode::CalibLen { p1, p2 } => {
             let s1 = norm_to_screen(*p1, img_rect);
             let s2 = norm_to_screen(*p2, img_rect);
@@ -133,18 +135,10 @@ fn draw_calib_overlay(app: &App, ui: &mut egui::Ui, img_rect: Rect) {
             dot(*p1);
             dot(*p2);
             let mid = Pos2::new((s1.x + s2.x) / 2.0, (s1.y + s2.y) / 2.0 - 18.0);
-            painter.rect_filled(
-                Rect::from_center_size(mid, Vec2::new(195.0, 22.0)),
-                4.0,
-                egui::Color32::from_black_alpha(175),
-            );
-            painter.text(
-                mid, egui::Align2::CENTER_CENTER,
-                "Enter length in toolbar ↑",
-                egui::FontId::proportional(13.0),
-                egui::Color32::YELLOW,
-            );
+            painter.rect_filled(Rect::from_center_size(mid, Vec2::new(195.0, 22.0)), 4.0, egui::Color32::from_black_alpha(175));
+            painter.text(mid, egui::Align2::CENTER_CENTER, "Enter length in toolbar", egui::FontId::proportional(13.0), egui::Color32::YELLOW);
         }
         _ => {}
     }
 }
+// </calibration overlay drawing>

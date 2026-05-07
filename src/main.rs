@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 mod app;
 mod color;
 mod export;
@@ -8,6 +10,7 @@ mod ui;
 
 use app::App;
 
+// <entry point>
 fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Image Segmenter",
@@ -20,3 +23,4 @@ fn main() -> eframe::Result<()> {
         Box::new(|_cc| Ok(Box::new(App::default()))),
     )
 }
+// </entry point>
