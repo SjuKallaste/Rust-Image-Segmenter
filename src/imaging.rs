@@ -1,5 +1,6 @@
 use egui::ColorImage;
 use image::DynamicImage;
+use rayon::prelude::*;
 use std::collections::HashSet;
 
 use crate::color::hsv_to_rgb;
@@ -8,26 +9,86 @@ use crate::color::hsv_to_rgb;
 pub fn box_blur(img: &DynamicImage, radius: u32) -> DynamicImage {
     if radius == 0 { return img.clone(); }
     let src = img.to_rgb8();
-    let w = src.width();
-    let h = src.height();
-    let mut out = image::RgbImage::new(w, h);
-    for y in 0..h {
-        for x in 0..w {
-            let x0 = x.saturating_sub(radius);
-            let x1 = (x + radius).min(w - 1);
-            let y0 = y.saturating_sub(radius);
-            let y1 = (y + radius).min(h - 1);
-            let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
-            for ny in y0..=y1 {
-                for nx in x0..=x1 {
-                    let p = src.get_pixel(nx, ny);
-                    r += p[0] as u32; g += p[1] as u32; b += p[2] as u32; n += 1;
-                }
+    let w = src.width() as usize;
+    let h = src.height() as usize;
+    let r = radius as usize;
+    let mut horiz = vec![[0f32; 3]; w * h];
+    let mut out_f = vec![[0f32; 3]; w * h];
+    let raw = src.as_raw();
+
+    horiz.par_chunks_mut(w).enumerate().for_each(|(y, row_out)| {
+        let row = &raw[y * w * 3..(y + 1) * w * 3];
+        let get = |x: usize| {
+            let i = x * 3;
+            [row[i] as f32, row[i + 1] as f32, row[i + 2] as f32]
+        };
+        let mut sum = [0f32; 3];
+        let mut count = 0f32;
+        for nx in 0..=r.min(w - 1) {
+            let c = get(nx);
+            sum[0] += c[0]; sum[1] += c[1]; sum[2] += c[2];
+            count += 1.0;
+        }
+        row_out[0] = [sum[0] / count, sum[1] / count, sum[2] / count];
+        for x in 1..w {
+            let add_idx = x + r;
+            let rem_idx = x as isize - r as isize - 1;
+            if add_idx < w {
+                let c = get(add_idx);
+                sum[0] += c[0]; sum[1] += c[1]; sum[2] += c[2];
+                count += 1.0;
             }
-            out.put_pixel(x, y, image::Rgb([(r/n) as u8, (g/n) as u8, (b/n) as u8]));
+            if rem_idx >= 0 {
+                let c = get(rem_idx as usize);
+                sum[0] -= c[0]; sum[1] -= c[1]; sum[2] -= c[2];
+                count -= 1.0;
+            }
+            row_out[x] = [sum[0] / count, sum[1] / count, sum[2] / count];
+        }
+    });
+
+    let columns: Vec<Vec<[f32; 3]>> = (0..w).into_par_iter().map(|x| {
+        let mut col_out = vec![[0f32; 3]; h];
+        let mut sum = [0f32; 3];
+        let mut count = 0f32;
+        for ny in 0..=r.min(h - 1) {
+            let c = horiz[ny * w + x];
+            sum[0] += c[0]; sum[1] += c[1]; sum[2] += c[2];
+            count += 1.0;
+        }
+        col_out[0] = [sum[0] / count, sum[1] / count, sum[2] / count];
+        for y in 1..h {
+            let add_idx = y + r;
+            let rem_idx = y as isize - r as isize - 1;
+            if add_idx < h {
+                let c = horiz[add_idx * w + x];
+                sum[0] += c[0]; sum[1] += c[1]; sum[2] += c[2];
+                count += 1.0;
+            }
+            if rem_idx >= 0 {
+                let c = horiz[rem_idx as usize * w + x];
+                sum[0] -= c[0]; sum[1] -= c[1]; sum[2] -= c[2];
+                count -= 1.0;
+            }
+            col_out[y] = [sum[0] / count, sum[1] / count, sum[2] / count];
+        }
+        col_out
+    }).collect();
+
+    for x in 0..w {
+        for y in 0..h {
+            out_f[y * w + x] = columns[x][y];
         }
     }
-    DynamicImage::ImageRgb8(out)
+
+    let mut out_img = image::RgbImage::new(w as u32, h as u32);
+    for y in 0..h {
+        for x in 0..w {
+            let c = out_f[y * w + x];
+            out_img.put_pixel(x as u32, y as u32, image::Rgb([c[0] as u8, c[1] as u8, c[2] as u8]));
+        }
+    }
+    DynamicImage::ImageRgb8(out_img)
 }
 // </box blur>
 

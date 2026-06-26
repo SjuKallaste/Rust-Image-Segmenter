@@ -1,5 +1,6 @@
 use egui::ColorImage;
 use image::DynamicImage;
+use rayon::prelude::*;
 
 // <color filter struct>
 #[derive(Clone, PartialEq)]
@@ -101,7 +102,8 @@ pub fn build_color_filter_texture(img: &DynamicImage, filters: &[&ColorFilter]) 
     let rgb = img.to_rgb8();
     let w = rgb.width() as usize;
     let h = rgb.height() as usize;
-    let pixels = rgb.pixels().map(|p| {
+    let raw = rgb.as_raw();
+    let pixels = raw.par_chunks_exact(3).map(|p| {
         let (r, g, b) = (p[0], p[1], p[2]);
         if filters.iter().any(|f| pixel_matches_filter(r, g, b, f)) {
             egui::Color32::from_rgb(r, g, b)
@@ -116,7 +118,8 @@ pub fn build_imagej_filter_texture(img: &DynamicImage, h_min: u8, h_max: u8, s_m
     let rgb = img.to_rgb8();
     let w = rgb.width() as usize;
     let h = rgb.height() as usize;
-    let pixels = rgb.pixels().map(|p| {
+    let raw = rgb.as_raw();
+    let pixels = raw.par_chunks_exact(3).map(|p| {
         let (r, g, b) = (p[0], p[1], p[2]);
         if pixel_matches_imagej(r, g, b, h_min, h_max, s_min, s_max, bri_min, bri_max) {
             egui::Color32::from_rgb(r, g, b)
@@ -132,15 +135,28 @@ pub fn build_imagej_filter_texture(img: &DynamicImage, h_min: u8, h_max: u8, s_m
 pub fn compute_prominent_filters(img: &DynamicImage, filters: &[ColorFilter], threshold: f64) -> Vec<usize> {
     let rgb = img.to_rgb8();
     let total = (rgb.width() * rgb.height()) as f64;
-    let mut counts = vec![0usize; filters.len()];
-    for p in rgb.pixels() {
-        for (i, f) in filters.iter().enumerate() {
-            if pixel_matches_filter(p[0], p[1], p[2], f) {
-                counts[i] += 1;
-                break;
-            }
-        }
-    }
+    let raw = rgb.as_raw();
+    let n_filters = filters.len();
+    let counts = raw.par_chunks_exact(3)
+        .fold(
+            || vec![0usize; n_filters],
+            |mut local_counts, p| {
+                for (i, f) in filters.iter().enumerate() {
+                    if pixel_matches_filter(p[0], p[1], p[2], f) {
+                        local_counts[i] += 1;
+                        break;
+                    }
+                }
+                local_counts
+            },
+        )
+        .reduce(
+            || vec![0usize; n_filters],
+            |mut a, b| {
+                for i in 0..n_filters { a[i] += b[i]; }
+                a
+            },
+        );
     let mut prominent: Vec<(usize, usize)> = counts.iter().enumerate()
         .filter(|&(_, &c)| c as f64 / total >= threshold)
         .map(|(i, &c)| (i, c))
@@ -153,13 +169,17 @@ pub fn compute_prominent_filters(img: &DynamicImage, filters: &[ColorFilter], th
 // <area measurement>
 pub fn pixel_area_for_filter(img: &DynamicImage, filter: &ColorFilter, scale_px_per_cm: f64) -> (usize, f64) {
     let rgb = img.to_rgb8();
-    let count = rgb.pixels().filter(|p| pixel_matches_filter(p[0], p[1], p[2], filter)).count();
+    let raw = rgb.as_raw();
+    let count = raw.par_chunks_exact(3)
+        .filter(|p| pixel_matches_filter(p[0], p[1], p[2], filter))
+        .count();
     (count, count as f64 / (scale_px_per_cm * scale_px_per_cm))
 }
 
 pub fn pixel_area_imagej(img: &DynamicImage, h_min: u8, h_max: u8, s_min: u8, s_max: u8, bri_min: u8, bri_max: u8, scale_px_per_cm: f64) -> (usize, f64) {
     let rgb = img.to_rgb8();
-    let count = rgb.pixels()
+    let raw = rgb.as_raw();
+    let count = raw.par_chunks_exact(3)
         .filter(|p| pixel_matches_imagej(p[0], p[1], p[2], h_min, h_max, s_min, s_max, bri_min, bri_max))
         .count();
     (count, count as f64 / (scale_px_per_cm * scale_px_per_cm))

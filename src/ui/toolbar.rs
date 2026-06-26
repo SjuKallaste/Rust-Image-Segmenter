@@ -113,7 +113,6 @@ fn show_load_button(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
                     app.mode = Mode::Ready;
                     app.prominent_filter_indices = compute_prominent_filters(app.image.as_ref().unwrap(), &app.color_filters, 0.05);
                     app.show_all_colors = false;
-                    app.status = format!("Loaded ({} × {} px). Step 2 - Set Scale.", app.img_w, app.img_h);
                 }
                 Err(e) => app.status = format!("Error: {e}"),
             }
