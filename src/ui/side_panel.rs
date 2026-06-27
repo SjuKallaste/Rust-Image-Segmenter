@@ -41,6 +41,8 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             } else {
                 show_named_panel(app, ctx, ui);
             }
+
+            show_gpu_toggle(app, ui);
         });
 }
 // </side panel>
@@ -77,17 +79,14 @@ fn show_named_panel(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
     ui.add_space(4.0);
     ui.separator();
 
-    // <show all toggle>
     let toggle_label = if app.show_all_colors { "▲ Show detected only" } else { "▼ Show all colors" };
     if ui.button(egui::RichText::new(toggle_label).small()).clicked() {
         app.show_all_colors = !app.show_all_colors;
     }
-    // </show all toggle>
 
     ui.add_space(4.0);
     ui.separator();
 
-    // <clear button>
     if !app.active_color_filters.is_empty() {
         if ui.button("✖  Clear filters").clicked() {
             app.active_color_filters.clear();
@@ -96,7 +95,6 @@ fn show_named_panel(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
     } else {
         ui.label(egui::RichText::new("No filter active").italics().small().color(egui::Color32::GRAY));
     }
-    // </clear button>
 }
 // </named color buttons>
 
@@ -125,6 +123,31 @@ fn show_imagej_panel(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
     if changed { rebuild_filter_texture(app, ctx); }
 }
 // </imagej hsb sliders>
+
+// <advanced settings: gpu toggle>
+fn show_gpu_toggle(app: &mut App, ui: &mut egui::Ui) {
+    ui.add_space(6.0);
+    ui.separator();
+    ui.label(egui::RichText::new("Advanced").small().strong());
+
+    if !app.gpu_available {
+        ui.label(
+            egui::RichText::new("No compatible GPU found.\nUsing CPU only.")
+                .italics().small().color(egui::Color32::GRAY),
+        );
+        return;
+    }
+
+    ui.checkbox(&mut app.gpu_enabled, "GPU-accelerated scanning");
+
+    let note = if app.gpu_is_discrete {
+        "Discrete GPU detected.\nEnabled by default for\nimages 4K or larger."
+    } else {
+        "Integrated/virtual GPU.\nOff by default, CPU is\nusually faster here."
+    };
+    ui.label(egui::RichText::new(note).italics().small().color(egui::Color32::GRAY));
+}
+// </advanced settings: gpu toggle>
 
 // <rebuild filter texture>
 pub fn rebuild_filter_texture(app: &mut App, ctx: &egui::Context) {

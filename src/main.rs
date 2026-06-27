@@ -1,8 +1,7 @@
-#![windows_subsystem = "windows"]
-
 mod app;
 mod color;
 mod export;
+mod gpu;
 mod imaging;
 mod segment;
 mod types;

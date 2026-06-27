@@ -2,7 +2,7 @@ use egui::{Rect, TextureHandle};
 use image::DynamicImage;
 use std::collections::HashSet;
 
-use crate::color::{all_color_filters, compute_prominent_filters, ColorFilter};
+use crate::color::{all_color_filters, ColorFilter};
 use crate::types::{Mode, Region, Unit};
 
 // <app state>
@@ -59,6 +59,13 @@ pub struct App {
     pub imagej_bri_max: u8,
     // </imagej hsb mode>
 
+    // <gpu acceleration>
+    pub gpu_ctx: Option<crate::gpu::GpuContext>,
+    pub gpu_enabled: bool,
+    pub gpu_available: bool,
+    pub gpu_is_discrete: bool,
+    // </gpu acceleration>
+
     pub status: String,
 }
 // </app state>
@@ -66,7 +73,7 @@ pub struct App {
 // <default values>
 impl Default for App {
     fn default() -> Self {
-        Self {
+        let mut app = Self {
             image: None,
             img_w: 0,
             img_h: 0,
@@ -99,8 +106,23 @@ impl Default for App {
             imagej_sat_max: 255,
             imagej_bri_min: 0,
             imagej_bri_max: 255,
+            gpu_ctx: None,
+            gpu_enabled: false,
+            gpu_available: false,
+            gpu_is_discrete: false,
             status: "Step 1: Load an image.".into(),
+        };
+
+        if let Some(ctx) = crate::gpu::try_init_gpu() {
+            app.gpu_available = true;
+            app.gpu_is_discrete = ctx.is_discrete;
+            // default GPU acceleration on for discrete GPUs, off for
+            // integrated/virtual GPUs where the win is less certain
+            app.gpu_enabled = ctx.is_discrete;
+            app.gpu_ctx = Some(ctx);
         }
+
+        app
     }
 }
 // </default values>

@@ -191,3 +191,32 @@ pub fn rgb_to_hsv(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
     (h as f32 / 255.0 * 360.0, s as f32 / 255.0, v as f32 / 255.0)
 }
 // </area measurement>
+
+// <imagej area dispatch, gpu when large and available, cpu otherwise>
+pub fn pixel_area_imagej_auto(
+    app: &crate::app::App,
+    img: &DynamicImage,
+    h_min: u8, h_max: u8,
+    s_min: u8, s_max: u8,
+    bri_min: u8, bri_max: u8,
+    scale_px_per_cm: f64,
+) -> (usize, f64) {
+    let n_pixels = img.width() * img.height();
+    let should_try_gpu = app.gpu_enabled
+        && app.gpu_available
+        && n_pixels >= crate::gpu::GPU_PIXEL_THRESHOLD;
+
+    if should_try_gpu {
+        if let Some(ctx) = &app.gpu_ctx {
+            if let Some((_, count)) = crate::gpu::gpu_filter_imagej(
+                ctx, img, h_min, h_max, s_min, s_max, bri_min, bri_max,
+            ) {
+                let area = count as f64 / (scale_px_per_cm * scale_px_per_cm);
+                return (count as usize, area);
+            }
+        }
+    }
+
+    pixel_area_imagej(img, h_min, h_max, s_min, s_max, bri_min, bri_max, scale_px_per_cm)
+}
+// </imagej area dispatch, gpu when large and available, cpu otherwise>
