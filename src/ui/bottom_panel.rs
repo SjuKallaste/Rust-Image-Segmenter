@@ -16,12 +16,12 @@ pub fn show(app: &App, ui: &mut egui::Ui) {
 }
 // </bottom panel>
 
-// <imagej area display>
+// <imagej area display, reads app.rgb_cache>
 fn show_imagej_mode(app: &App, ui: &mut egui::Ui) {
-    let Some(img) = &app.image else { return };
+    let Some(rgb) = &app.rgb_cache else { return };
     let Some(scale) = app.scale_px_per_cm else { return };
     let (px_count, area_cm2) = pixel_area_imagej_auto(
-        app, img,
+        app, rgb,
         app.imagej_hue_min, app.imagej_hue_max,
         app.imagej_sat_min, app.imagej_sat_max,
         app.imagej_bri_min, app.imagej_bri_max,
@@ -41,11 +41,11 @@ fn show_imagej_mode(app: &App, ui: &mut egui::Ui) {
         ui.end_row();
     });
 }
-// </imagej area display>
+// </imagej area display, reads app.rgb_cache>
 
-// <named filter area display>
+// <named filter area display, reads app.rgb_cache>
 fn show_filter_mode(app: &App, ui: &mut egui::Ui) {
-    let Some(img) = &app.image else { return };
+    let Some(rgb) = &app.rgb_cache else { return };
     let Some(scale) = app.scale_px_per_cm else { return };
     let factor = app.unit.factor();
     let unit_lbl = app.unit.label();
@@ -59,7 +59,7 @@ fn show_filter_mode(app: &App, ui: &mut egui::Ui) {
         ui.end_row();
         for fi in &filter_indices {
             let f = &app.color_filters[*fi];
-            let (px_count, area_cm2) = pixel_area_for_filter(img, f, scale);
+            let (px_count, area_cm2) = pixel_area_for_filter(rgb, f, scale);
             ui.horizontal(|ui| {
                 let (sw, _) = ui.allocate_exact_size(Vec2::new(18.0, 18.0), egui::Sense::hover());
                 ui.painter().rect_filled(sw, 3.0, f.swatch);
@@ -71,7 +71,7 @@ fn show_filter_mode(app: &App, ui: &mut egui::Ui) {
         }
     });
 }
-// </named filter area display>
+// </named filter area display, reads app.rgb_cache>
 
 // <normal region table>
 fn show_normal_mode(app: &App, ui: &mut egui::Ui) {

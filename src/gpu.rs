@@ -1,4 +1,4 @@
-use image::DynamicImage;
+use image::RgbImage;
 use wgpu::util::DeviceExt;
 
 // <gpu size threshold>
@@ -135,21 +135,20 @@ pub fn try_init_gpu() -> Option<GpuContext> {
 }
 // </gpu init, returns none on any failure or insufficient hardware>
 
-// <gpu filter dispatch>
+// <gpu filter dispatch, takes a pre-converted rgb8 buffer>
 pub fn gpu_filter_imagej(
     ctx: &GpuContext,
-    img: &DynamicImage,
+    rgb: &RgbImage,
     h_min: u8, h_max: u8,
     s_min: u8, s_max: u8,
     bri_min: u8, bri_max: u8,
 ) -> Option<(Vec<u8>, u32)> {
-    let rgba = img.to_rgba8();
-    let w = rgba.width();
-    let h = rgba.height();
+    let w = rgb.width();
+    let h = rgb.height();
     let n_pixels = (w * h) as usize;
 
-    let packed: Vec<u32> = rgba.as_raw()
-        .chunks_exact(4)
+    let packed: Vec<u32> = rgb.as_raw()
+        .chunks_exact(3)
         .map(|p| (p[0] as u32) | (p[1] as u32) << 8 | (p[2] as u32) << 16)
         .collect();
 
@@ -248,4 +247,4 @@ pub fn gpu_filter_imagej(
 
     Some((mask_data, count))
 }
-// </gpu filter dispatch>
+// </gpu filter dispatch, takes a pre-converted rgb8 buffer>

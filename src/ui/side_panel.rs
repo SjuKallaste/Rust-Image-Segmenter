@@ -14,12 +14,11 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             ui.label(egui::RichText::new("🎨 Color Filter").strong());
             ui.separator();
 
-            if !app.image.is_some() {
+            if app.rgb_cache.is_none() {
                 ui.label(egui::RichText::new("Load an image to\ndetect colors.").italics().small().color(egui::Color32::GRAY));
                 return;
             }
 
-            // <mode toggle>
             ui.horizontal(|ui| {
                 if ui.selectable_label(!app.imagej_mode, "Named").clicked() {
                     app.imagej_mode = false;
@@ -32,7 +31,6 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     rebuild_filter_texture(app, ctx);
                 }
             });
-            // </mode toggle>
 
             ui.separator();
 
@@ -149,23 +147,31 @@ fn show_gpu_toggle(app: &mut App, ui: &mut egui::Ui) {
 }
 // </advanced settings: gpu toggle>
 
-// <rebuild filter texture>
+// <rebuild filter texture, reads app.rgb_cache instead of re-converting>
 pub fn rebuild_filter_texture(app: &mut App, ctx: &egui::Context) {
-    if app.imagej_mode {
-        if let Some(img) = &app.image {
-            let ci = build_imagej_filter_texture(img, app.imagej_hue_min, app.imagej_hue_max, app.imagej_sat_min, app.imagej_sat_max, app.imagej_bri_min, app.imagej_bri_max);
-            app.color_filter_tex = Some(ctx.load_texture("cf", ci, TextureOptions::default()));
-        }
+    if app.rgb_cache.is_none() {
         return;
     }
+
+    if app.imagej_mode {
+        let ci = {
+            let rgb = app.rgb_cache.as_ref().unwrap();
+            build_imagej_filter_texture(rgb, app.imagej_hue_min, app.imagej_hue_max, app.imagej_sat_min, app.imagej_sat_max, app.imagej_bri_min, app.imagej_bri_max)
+        };
+        app.color_filter_tex = Some(ctx.load_texture("cf", ci, TextureOptions::default()));
+        return;
+    }
+
     if app.active_color_filters.is_empty() {
         app.color_filter_tex = None;
         return;
     }
-    if let Some(img) = &app.image {
+
+    let ci = {
+        let rgb = app.rgb_cache.as_ref().unwrap();
         let active_refs: Vec<&_> = app.active_color_filters.iter().map(|&idx| &app.color_filters[idx]).collect();
-        let ci = build_color_filter_texture(img, &active_refs);
-        app.color_filter_tex = Some(ctx.load_texture("cf", ci, TextureOptions::default()));
-    }
+        build_color_filter_texture(rgb, &active_refs)
+    };
+    app.color_filter_tex = Some(ctx.load_texture("cf", ci, TextureOptions::default()));
 }
-// </rebuild filter texture>
+// </rebuild filter texture, reads app.rgb_cache instead of re-converting>

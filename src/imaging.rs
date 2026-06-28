@@ -1,21 +1,19 @@
 use egui::ColorImage;
-use image::DynamicImage;
+use image::{DynamicImage, RgbImage};
 use rayon::prelude::*;
 use std::collections::HashSet;
 
 use crate::color::hsv_to_rgb;
 
-// <box blur>
-pub fn box_blur(img: &DynamicImage, radius: u32) -> DynamicImage {
-    if radius == 0 { return img.clone(); }
-    let src = img.to_rgb8();
+// <box blur, takes a pre-converted rgb8 buffer, two-pass separable, rayon parallel>
+pub fn box_blur(src: &RgbImage, radius: u32) -> RgbImage {
+    if radius == 0 { return src.clone(); }
     let w = src.width() as usize;
     let h = src.height() as usize;
     let r = radius as usize;
-    let mut horiz = vec![[0f32; 3]; w * h];
-    let mut out_f = vec![[0f32; 3]; w * h];
     let raw = src.as_raw();
 
+    let mut horiz = vec![[0f32; 3]; w * h];
     horiz.par_chunks_mut(w).enumerate().for_each(|(y, row_out)| {
         let row = &raw[y * w * 3..(y + 1) * w * 3];
         let get = |x: usize| {
@@ -47,6 +45,8 @@ pub fn box_blur(img: &DynamicImage, radius: u32) -> DynamicImage {
         }
     });
 
+    let mut out_raw = vec![0u8; w * h * 3];
+
     let columns: Vec<Vec<[f32; 3]>> = (0..w).into_par_iter().map(|x| {
         let mut col_out = vec![[0f32; 3]; h];
         let mut sum = [0f32; 3];
@@ -75,26 +75,22 @@ pub fn box_blur(img: &DynamicImage, radius: u32) -> DynamicImage {
         col_out
     }).collect();
 
-    for x in 0..w {
-        for y in 0..h {
-            out_f[y * w + x] = columns[x][y];
-        }
-    }
+    out_raw.par_chunks_mut(3).enumerate().for_each(|(idx, px)| {
+        let x = idx % w;
+        let y = idx / w;
+        let c = columns[x][y];
+        px[0] = c[0] as u8;
+        px[1] = c[1] as u8;
+        px[2] = c[2] as u8;
+    });
 
-    let mut out_img = image::RgbImage::new(w as u32, h as u32);
-    for y in 0..h {
-        for x in 0..w {
-            let c = out_f[y * w + x];
-            out_img.put_pixel(x as u32, y as u32, image::Rgb([c[0] as u8, c[1] as u8, c[2] as u8]));
-        }
-    }
-    DynamicImage::ImageRgb8(out_img)
+    RgbImage::from_raw(w as u32, h as u32, out_raw).expect("buffer size matches dimensions")
 }
-// </box blur>
+// </box blur, takes a pre-converted rgb8 buffer, two-pass separable, rayon parallel>
 
-// <sobel edge detection>
-pub fn sobel_texture(img: &DynamicImage) -> ColorImage {
-    let gray = img.to_luma8();
+// <sobel edge detection, takes a pre-converted rgb8 buffer>
+pub fn sobel_texture(rgb: &RgbImage) -> ColorImage {
+    let gray = image::DynamicImage::ImageRgb8(rgb.clone()).to_luma8();
     let w = gray.width() as usize;
     let h = gray.height() as usize;
     let get = |x: usize, y: usize| gray.get_pixel(x as u32, y as u32)[0] as f32;
@@ -111,7 +107,7 @@ pub fn sobel_texture(img: &DynamicImage) -> ColorImage {
     }
     ColorImage { size: [w, h], pixels }
 }
-// </sobel edge detection>
+// </sobel edge detection, takes a pre-converted rgb8 buffer>
 
 // <segmentation texture>
 pub fn build_seg_texture(labels: &[i32], w: u32, h: u32, n: usize, selected: &HashSet<usize>) -> ColorImage {
@@ -135,13 +131,14 @@ pub fn build_seg_texture(labels: &[i32], w: u32, h: u32, n: usize, selected: &Ha
 }
 // </segmentation texture>
 
-// <image format conversion>
+// <image format conversion, rayon parallel>
 pub fn dyn_to_color_image(img: &DynamicImage) -> ColorImage {
     let rgba = img.to_rgba8();
     let (w, h) = (rgba.width(), rgba.height());
-    let pixels = rgba.pixels()
+    let raw = rgba.as_raw();
+    let pixels = raw.par_chunks_exact(4)
         .map(|p| egui::Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]))
         .collect();
     ColorImage { size: [w as usize, h as usize], pixels }
 }
-// </image format conversion>
+// </image format conversion, rayon parallel>

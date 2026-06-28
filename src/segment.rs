@@ -1,4 +1,5 @@
-use image::DynamicImage;
+use image::RgbImage;
+use rayon::prelude::*;
 use std::collections::VecDeque;
 
 use crate::types::Region;
@@ -11,12 +12,12 @@ pub fn color_dist(a: [u8; 3], b: [u8; 3]) -> u32 {
 }
 // </color distance>
 
-// <flood fill segmentation>
-pub fn segment(img: &DynamicImage, tol: u32, min_px: usize, scale: f64) -> (Vec<i32>, Vec<Region>) {
-    let rgb = img.to_rgb8();
+// <flood fill segmentation, takes a pre-converted rgb8 buffer>
+pub fn segment(rgb: &RgbImage, tol: u32, min_px: usize, scale: f64) -> (Vec<i32>, Vec<Region>) {
     let w = rgb.width() as usize;
     let h = rgb.height() as usize;
-    let pixels: Vec<[u8; 3]> = rgb.pixels().map(|p| [p[0], p[1], p[2]]).collect();
+    let raw = rgb.as_raw();
+    let pixels: Vec<[u8; 3]> = raw.par_chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect();
     let mut labels = vec![-1i32; w * h];
     let mut next_lbl = 0usize;
     let mut counts: Vec<usize> = Vec::new();
@@ -60,7 +61,6 @@ pub fn segment(img: &DynamicImage, tol: u32, min_px: usize, scale: f64) -> (Vec<
         }
     }
 
-    // <filter small regions and build output>
     let px_per_cm2 = scale * scale;
     let mut id_map = vec![-1i32; next_lbl];
     let mut regions: Vec<Region> = Vec::new();
@@ -80,8 +80,7 @@ pub fn segment(img: &DynamicImage, tol: u32, min_px: usize, scale: f64) -> (Vec<
     for lbl in labels.iter_mut() {
         if *lbl >= 0 { *lbl = id_map[*lbl as usize]; }
     }
-    // </filter small regions and build output>
 
     (labels, regions)
 }
-// </flood fill segmentation>
+// </flood fill segmentation, takes a pre-converted rgb8 buffer>

@@ -3,8 +3,7 @@ use rfd::FileDialog;
 use std::collections::HashSet;
 
 use crate::app::App;
-use crate::color::build_color_filter_texture;
-use crate::color::compute_prominent_filters;
+use crate::color::{build_color_filter_texture, compute_prominent_filters};
 use crate::imaging::{box_blur, build_seg_texture, dyn_to_color_image, sobel_texture};
 use crate::export::export_csv;
 use crate::segment::segment;
@@ -16,7 +15,6 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
         ui.add_space(5.0);
 
-        // <row 1: file, calibration, segment, view>
         ui.horizontal_wrapped(|ui| {
             show_load_button(app, ctx, ui);
             ui.separator();
@@ -44,18 +42,16 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     ui.selectable_value(&mut app.unit, Unit::Mm2, "mm²");
                 });
         });
-        // </row 1: file, calibration, segment, view>
 
         ui.add_space(3.0);
 
-        // <row 2: params, selection, export>
         ui.horizontal_wrapped(|ui| {
             ui.label("Colour tol:");
-            ui.add(egui::Slider::new(&mut app.tolerance, 5..=255).clamp_to_range(true));
+            ui.add(egui::Slider::new(&mut app.tolerance, 5..=255));
             ui.label("Min px:");
-            ui.add(egui::Slider::new(&mut app.min_pixels, 50..=50_000).clamp_to_range(true));
+            ui.add(egui::Slider::new(&mut app.min_pixels, 50..=50_000));
             ui.label("Blur:");
-            ui.add(egui::Slider::new(&mut app.blur_radius, 0..=15).clamp_to_range(true))
+            ui.add(egui::Slider::new(&mut app.blur_radius, 0..=15))
                 .on_hover_text("Box blur radius before segmentation (0 = off)");
 
             if !app.regions.is_empty() {
@@ -78,14 +74,13 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 }
             }
         });
-        // </row 2: params, selection, export>
 
         ui.add_space(4.0);
     });
 }
 // </toolbar panel>
 
-// <load image>
+// <load image, builds the rgb cache once here>
 fn show_load_button(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
     if ui.button("📂  Load Image").clicked() {
         if let Some(path) = FileDialog::new()
@@ -94,11 +89,19 @@ fn show_load_button(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
         {
             match image::open(&path) {
                 Ok(img) => {
+                    app.status = "Decoding image...".into();
+
+                    let rgb = img.to_rgb8();
                     let ci = dyn_to_color_image(&img);
+
                     app.orig_tex = Some(ctx.load_texture("orig", ci, TextureOptions::default()));
                     app.img_w = img.width();
                     app.img_h = img.height();
+
+                    app.prominent_filter_indices = compute_prominent_filters(&rgb, &app.color_filters, 0.05);
+
                     app.image = Some(img);
+                    app.rgb_cache = Some(rgb);
                     app.seg_tex = None;
                     app.edge_tex = None;
                     app.color_filter_tex = None;
@@ -111,15 +114,15 @@ fn show_load_button(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
                     app.selected.clear();
                     app.total_area_cm2 = 0.0;
                     app.mode = Mode::Ready;
-                    app.prominent_filter_indices = compute_prominent_filters(app.image.as_ref().unwrap(), &app.color_filters, 0.05);
                     app.show_all_colors = false;
+                    app.status = format!("Loaded ({} × {} px). Step 2 - Set Scale.", app.img_w, app.img_h);
                 }
                 Err(e) => app.status = format!("Error: {e}"),
             }
         }
     }
 }
-// </load image>
+// </load image, builds the rgb cache once here>
 
 // <calibration controls>
 fn show_calibration(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
@@ -170,9 +173,9 @@ fn show_calibration(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
 }
 // </calibration controls>
 
-// <segment button>
+// <segment button, reuses app.rgb_cache instead of re-converting>
 fn show_segment_button(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
-    let can_seg = app.image.is_some()
+    let can_seg = app.rgb_cache.is_some()
         && app.scale_px_per_cm.is_some()
         && !matches!(app.mode, Mode::CalibP1 | Mode::CalibP2 { .. } | Mode::CalibLen { .. });
 
@@ -180,8 +183,10 @@ fn show_segment_button(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
         .on_hover_text("Detect coloured regions and compute their areas")
         .clicked()
     {
-        if let (Some(img), Some(scale)) = (&app.image, app.scale_px_per_cm) {
-            let processed = box_blur(img, app.blur_radius);
+        if let (Some(rgb), Some(scale)) = (&app.rgb_cache, app.scale_px_per_cm) {
+            app.status = "Segmenting...".into();
+
+            let processed = box_blur(rgb, app.blur_radius);
             let (labels, regions) = segment(&processed, app.tolerance, app.min_pixels, scale);
             let n = regions.len();
             let ci_seg = build_seg_texture(&labels, app.img_w, app.img_h, n, &HashSet::new());
@@ -189,7 +194,7 @@ fn show_segment_button(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
 
             if !app.active_color_filters.is_empty() {
                 let active_refs: Vec<&_> = app.active_color_filters.iter().map(|&i| &app.color_filters[i]).collect();
-                let ci_cf = build_color_filter_texture(img, &active_refs);
+                let ci_cf = build_color_filter_texture(rgb, &active_refs);
                 app.color_filter_tex = Some(ctx.load_texture("cf", ci_cf, TextureOptions::default()));
             }
 
@@ -206,4 +211,4 @@ fn show_segment_button(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
         }
     }
 }
-// </segment button>
+// </segment button, reuses app.rgb_cache instead of re-converting>

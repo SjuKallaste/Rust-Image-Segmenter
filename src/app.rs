@@ -1,5 +1,5 @@
 use egui::{Rect, TextureHandle};
-use image::DynamicImage;
+use image::{DynamicImage, RgbImage};
 use std::collections::HashSet;
 
 use crate::color::{all_color_filters, ColorFilter};
@@ -8,6 +8,9 @@ use crate::types::{Mode, Region, Unit};
 // <app state>
 pub struct App {
     pub image: Option<DynamicImage>,
+    // <cached rgb8 buffer, built once on load, reused by every per-pixel op>
+    pub rgb_cache: Option<RgbImage>,
+    // </cached rgb8 buffer, built once on load, reused by every per-pixel op>
     pub img_w: u32,
     pub img_h: u32,
 
@@ -75,6 +78,7 @@ impl Default for App {
     fn default() -> Self {
         let mut app = Self {
             image: None,
+            rgb_cache: None,
             img_w: 0,
             img_h: 0,
             orig_tex: None,
@@ -116,8 +120,6 @@ impl Default for App {
         if let Some(ctx) = crate::gpu::try_init_gpu() {
             app.gpu_available = true;
             app.gpu_is_discrete = ctx.is_discrete;
-            // default GPU acceleration on for discrete GPUs, off for
-            // integrated/virtual GPUs where the win is less certain
             app.gpu_enabled = ctx.is_discrete;
             app.gpu_ctx = Some(ctx);
         }
