@@ -8,51 +8,38 @@ use crate::types::{Mode, Region, Unit};
 // <app state>
 pub struct App {
     pub image: Option<DynamicImage>,
-    // <cached rgb8 buffer, built once on load, reused by every per-pixel op>
     pub rgb_cache: Option<RgbImage>,
-    // </cached rgb8 buffer, built once on load, reused by every per-pixel op>
     pub img_w: u32,
     pub img_h: u32,
 
-    // <textures>
     pub orig_tex: Option<TextureHandle>,
     pub seg_tex: Option<TextureHandle>,
     pub edge_tex: Option<TextureHandle>,
     pub color_filter_tex: Option<TextureHandle>,
-    // </textures>
 
     pub img_rect: Rect,
     pub show_seg: bool,
     pub show_edges: bool,
 
-    // <calibration>
     pub mode: Mode,
     pub calib_len_buf: String,
     pub scale_px_per_cm: Option<f64>,
-    // </calibration>
 
-    // <segmentation params>
     pub tolerance: u32,
     pub min_pixels: usize,
     pub blur_radius: u32,
-    // </segmentation params>
 
-    // <segmentation results>
     pub label_map: Vec<i32>,
     pub regions: Vec<Region>,
     pub selected: HashSet<usize>,
     pub total_area_cm2: f64,
     pub unit: Unit,
-    // </segmentation results>
 
-    // <color filter panel>
     pub color_filters: Vec<ColorFilter>,
     pub active_color_filters: HashSet<usize>,
     pub prominent_filter_indices: Vec<usize>,
     pub show_all_colors: bool,
-    // </color filter panel>
 
-    // <imagej hsb mode>
     pub imagej_mode: bool,
     pub imagej_hue_min: u8,
     pub imagej_hue_max: u8,
@@ -60,14 +47,17 @@ pub struct App {
     pub imagej_sat_max: u8,
     pub imagej_bri_min: u8,
     pub imagej_bri_max: u8,
-    // </imagej hsb mode>
 
-    // <gpu acceleration>
+    // <gpu acceleration, for the color filter / imagej area scan>
     pub gpu_ctx: Option<crate::gpu::GpuContext>,
     pub gpu_enabled: bool,
     pub gpu_available: bool,
     pub gpu_is_discrete: bool,
-    // </gpu acceleration>
+    // </gpu acceleration, for the color filter / imagej area scan>
+
+    // <segmentation engine choice, single threaded exact vs parallel approximate>
+    pub use_parallel_segment: bool,
+    // </segmentation engine choice, single threaded exact vs parallel approximate>
 
     pub status: String,
 }
@@ -114,6 +104,7 @@ impl Default for App {
             gpu_enabled: false,
             gpu_available: false,
             gpu_is_discrete: false,
+            use_parallel_segment: true,
             status: "Step 1: Load an image.".into(),
         };
 

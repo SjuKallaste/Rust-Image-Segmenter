@@ -6,7 +6,7 @@ use crate::app::App;
 use crate::color::{build_color_filter_texture, compute_prominent_filters};
 use crate::imaging::{box_blur, build_seg_texture, dyn_to_color_image, sobel_texture};
 use crate::export::export_csv;
-use crate::segment::segment;
+use crate::segment::{segment, segment_parallel};
 use crate::types::{Mode, Unit};
 use crate::ui::calib::norm_to_px_dist;
 
@@ -53,6 +53,13 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             ui.label("Blur:");
             ui.add(egui::Slider::new(&mut app.blur_radius, 0..=15))
                 .on_hover_text("Box blur radius before segmentation (0 = off)");
+
+            ui.separator();
+            ui.label("Segment engine:");
+            ui.selectable_value(&mut app.use_parallel_segment, true, "Parallel")
+                .on_hover_text("Splits the image into strips and segments them on multiple CPU cores. Fast, but regions that straddle a strip boundary are merged after the fact and may very rarely differ slightly from the exact result.");
+            ui.selectable_value(&mut app.use_parallel_segment, false, "Exact")
+                .on_hover_text("Single-threaded, identical to the original algorithm. Slower on large images.");
 
             if !app.regions.is_empty() {
                 ui.separator();
@@ -173,7 +180,7 @@ fn show_calibration(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
 }
 // </calibration controls>
 
-// <segment button, reuses app.rgb_cache instead of re-converting>
+// <segment button, picks engine based on app.use_parallel_segment>
 fn show_segment_button(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
     let can_seg = app.rgb_cache.is_some()
         && app.scale_px_per_cm.is_some()
@@ -187,7 +194,11 @@ fn show_segment_button(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
             app.status = "Segmenting...".into();
 
             let processed = box_blur(rgb, app.blur_radius);
-            let (labels, regions) = segment(&processed, app.tolerance, app.min_pixels, scale);
+            let (labels, regions) = if app.use_parallel_segment {
+                segment_parallel(&processed, app.tolerance, app.min_pixels, scale)
+            } else {
+                segment(&processed, app.tolerance, app.min_pixels, scale)
+            };
             let n = regions.len();
             let ci_seg = build_seg_texture(&labels, app.img_w, app.img_h, n, &HashSet::new());
             let ci_edge = sobel_texture(&processed);
@@ -207,8 +218,9 @@ fn show_segment_button(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
             app.show_seg = true;
             app.show_edges = false;
             app.mode = Mode::Segmented;
-            app.status = format!("Done - {n} region(s) found. Click any region to select it.");
+            let engine = if app.use_parallel_segment { "parallel" } else { "exact" };
+            app.status = format!("Done ({engine}) - {n} region(s) found. Click any region to select it.");
         }
     }
 }
-// </segment button, reuses app.rgb_cache instead of re-converting>
+// </segment button, picks engine based on app.use_parallel_segment>

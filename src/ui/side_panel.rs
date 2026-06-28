@@ -7,8 +7,8 @@ use crate::color::{build_color_filter_texture, build_imagej_filter_texture};
 pub fn show(app: &mut App, ctx: &egui::Context) {
     egui::SidePanel::right("color_filter_panel")
         .resizable(false)
-        .min_width(155.0)
-        .max_width(155.0)
+        .min_width(160.0)
+        .max_width(160.0)
         .show(ctx, |ui| {
             ui.add_space(6.0);
             ui.label(egui::RichText::new("🎨 Color Filter").strong());
@@ -40,7 +40,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 show_named_panel(app, ctx, ui);
             }
 
-            show_gpu_toggle(app, ui);
+            show_engine_settings(app, ui);
         });
 }
 // </side panel>
@@ -64,7 +64,7 @@ fn show_named_panel(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
             let btn = egui::Button::new(btn_text)
                 .fill(filter.swatch)
                 .stroke(egui::Stroke::new(if is_active { 2.5 } else { 0.0 }, egui::Color32::WHITE))
-                .min_size(Vec2::new(140.0, 22.0));
+                .min_size(Vec2::new(145.0, 22.0));
             if ui.add(btn).clicked() {
                 if is_active { app.active_color_filters.remove(&i); }
                 else { app.active_color_filters.insert(i); }
@@ -122,30 +122,37 @@ fn show_imagej_panel(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
 }
 // </imagej hsb sliders>
 
-// <advanced settings: gpu toggle>
-fn show_gpu_toggle(app: &mut App, ui: &mut egui::Ui) {
+// <advanced settings: explicit cpu/gpu choice for color filtering>
+fn show_engine_settings(app: &mut App, ui: &mut egui::Ui) {
     ui.add_space(6.0);
     ui.separator();
     ui.label(egui::RichText::new("Advanced").small().strong());
 
+    ui.label(egui::RichText::new("Color filter scanning:").small());
+    ui.horizontal(|ui| {
+        ui.selectable_value(&mut app.gpu_enabled, false, "CPU");
+        if app.gpu_available {
+            ui.selectable_value(&mut app.gpu_enabled, true, "GPU");
+        } else {
+            ui.add_enabled(false, egui::SelectableLabel::new(false, "GPU"));
+        }
+    });
+
     if !app.gpu_available {
         ui.label(
-            egui::RichText::new("No compatible GPU found.\nUsing CPU only.")
+            egui::RichText::new("No compatible GPU found.\nCPU only.")
                 .italics().small().color(egui::Color32::GRAY),
         );
-        return;
+    } else if app.gpu_enabled {
+        let note = if app.gpu_is_discrete {
+            "Discrete GPU."
+        } else {
+            "Integrated/virtual GPU,\nmay not be faster than CPU."
+        };
+        ui.label(egui::RichText::new(note).italics().small().color(egui::Color32::GRAY));
     }
-
-    ui.checkbox(&mut app.gpu_enabled, "GPU-accelerated scanning");
-
-    let note = if app.gpu_is_discrete {
-        "Discrete GPU detected.\nEnabled by default for\nimages 4K or larger."
-    } else {
-        "Integrated/virtual GPU.\nOff by default, CPU is\nusually faster here."
-    };
-    ui.label(egui::RichText::new(note).italics().small().color(egui::Color32::GRAY));
 }
-// </advanced settings: gpu toggle>
+// </advanced settings: explicit cpu/gpu choice for color filtering>
 
 // <rebuild filter texture, reads app.rgb_cache instead of re-converting>
 pub fn rebuild_filter_texture(app: &mut App, ctx: &egui::Context) {

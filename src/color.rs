@@ -97,7 +97,7 @@ pub fn pixel_matches_imagej(r: u8, g: u8, b: u8, h_min: u8, h_max: u8, s_min: u8
 }
 // </pixel matching>
 
-// <texture builders, take a pre-converted rgb8 buffer, no internal copy>
+// <texture builders, take a pre-converted rgb8 buffer>
 pub fn build_color_filter_texture(rgb: &RgbImage, filters: &[&ColorFilter]) -> ColorImage {
     let w = rgb.width() as usize;
     let h = rgb.height() as usize;
@@ -127,7 +127,7 @@ pub fn build_imagej_filter_texture(rgb: &RgbImage, h_min: u8, h_max: u8, s_min: 
     }).collect();
     ColorImage { size: [w, h], pixels }
 }
-// </texture builders, take a pre-converted rgb8 buffer, no internal copy>
+// </texture builders, take a pre-converted rgb8 buffer>
 
 // <prominence analysis, takes a pre-converted rgb8 buffer>
 pub fn compute_prominent_filters(rgb: &RgbImage, filters: &[ColorFilter], threshold: f64) -> Vec<usize> {
@@ -163,7 +163,7 @@ pub fn compute_prominent_filters(rgb: &RgbImage, filters: &[ColorFilter], thresh
 }
 // </prominence analysis, takes a pre-converted rgb8 buffer>
 
-// <area measurement, takes a pre-converted rgb8 buffer>
+// <area measurement, cpu/rayon path, takes a pre-converted rgb8 buffer>
 pub fn pixel_area_for_filter(rgb: &RgbImage, filter: &ColorFilter, scale_px_per_cm: f64) -> (usize, f64) {
     let raw = rgb.as_raw();
     let count = raw.par_chunks_exact(3)
@@ -172,7 +172,7 @@ pub fn pixel_area_for_filter(rgb: &RgbImage, filter: &ColorFilter, scale_px_per_
     (count, count as f64 / (scale_px_per_cm * scale_px_per_cm))
 }
 
-pub fn pixel_area_imagej(rgb: &RgbImage, h_min: u8, h_max: u8, s_min: u8, s_max: u8, bri_min: u8, bri_max: u8, scale_px_per_cm: f64) -> (usize, f64) {
+pub fn pixel_area_imagej_cpu(rgb: &RgbImage, h_min: u8, h_max: u8, s_min: u8, s_max: u8, bri_min: u8, bri_max: u8, scale_px_per_cm: f64) -> (usize, f64) {
     let raw = rgb.as_raw();
     let count = raw.par_chunks_exact(3)
         .filter(|p| pixel_matches_imagej(p[0], p[1], p[2], h_min, h_max, s_min, s_max, bri_min, bri_max))
@@ -185,9 +185,13 @@ pub fn rgb_to_hsv(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
     let (h, s, v) = rgb_to_hsb(r, g, b);
     (h as f32 / 255.0 * 360.0, s as f32 / 255.0, v as f32 / 255.0)
 }
-// </area measurement, takes a pre-converted rgb8 buffer>
+// </area measurement, cpu/rayon path, takes a pre-converted rgb8 buffer>
 
-// <imagej area dispatch, gpu when large and available, cpu otherwise>
+// <imagej area dispatch, respects the user's explicit cpu/gpu toggle>
+// gpu_enabled is the user's explicit choice. If they have it on and a usable
+// context exists, GPU is used regardless of image size. If GPU fails for any
+// reason (driver issue, mapping failure), this falls back to CPU so the user
+// always gets a result rather than nothing.
 pub fn pixel_area_imagej_auto(
     app: &crate::app::App,
     rgb: &RgbImage,
@@ -196,12 +200,7 @@ pub fn pixel_area_imagej_auto(
     bri_min: u8, bri_max: u8,
     scale_px_per_cm: f64,
 ) -> (usize, f64) {
-    let n_pixels = rgb.width() * rgb.height();
-    let should_try_gpu = app.gpu_enabled
-        && app.gpu_available
-        && n_pixels >= crate::gpu::GPU_PIXEL_THRESHOLD;
-
-    if should_try_gpu {
+    if app.gpu_enabled && app.gpu_available {
         if let Some(ctx) = &app.gpu_ctx {
             if let Some((_, count)) = crate::gpu::gpu_filter_imagej(
                 ctx, rgb, h_min, h_max, s_min, s_max, bri_min, bri_max,
@@ -212,6 +211,6 @@ pub fn pixel_area_imagej_auto(
         }
     }
 
-    pixel_area_imagej(rgb, h_min, h_max, s_min, s_max, bri_min, bri_max, scale_px_per_cm)
+    pixel_area_imagej_cpu(rgb, h_min, h_max, s_min, s_max, bri_min, bri_max, scale_px_per_cm)
 }
-// </imagej area dispatch, gpu when large and available, cpu otherwise>
+// </imagej area dispatch, respects the user's explicit cpu/gpu toggle>
