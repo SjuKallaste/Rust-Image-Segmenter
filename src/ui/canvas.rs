@@ -5,14 +5,24 @@ use crate::imaging::build_seg_texture;
 use crate::types::Mode;
 use crate::ui::calib::{norm_to_screen, screen_to_norm};
 
+const MAX_LABELED_REGIONS: usize = 5;
+
 // <canvas panel>
 pub fn show(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
-    let tex_ref = if app.show_seg { app.seg_tex.as_ref().or(app.orig_tex.as_ref()) } else { app.orig_tex.as_ref() };
+    let tex_ref = if app.show_seg {
+        app.seg_tex.as_ref().or(app.orig_tex.as_ref())
+    } else {
+        app.orig_tex.as_ref()
+    };
 
     let tex = match tex_ref {
         None => {
             ui.centered_and_justified(|ui| {
-                ui.label(egui::RichText::new("No image loaded.\n\nClick  📂 Load Image  to begin.").size(20.0).color(egui::Color32::GRAY));
+                ui.label(
+                    egui::RichText::new("No image loaded.\n\nClick  📂 Load Image  to begin.")
+                        .size(20.0)
+                        .color(egui::Color32::GRAY),
+                );
             });
             return;
         }
@@ -70,11 +80,16 @@ pub fn show(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
 
     draw_calib_overlay(app, ui, img_rect);
 
-    // <region labels>
-    if app.show_seg {
+    // <region labels, only the top 5 largest by pixel count>
+    if app.show_seg && !app.regions.is_empty() {
         let font = egui::FontId::proportional(14.0);
         let painter = ui.painter();
-        for r in &app.regions {
+
+        let mut sorted: Vec<usize> = (0..app.regions.len()).collect();
+        sorted.sort_by(|&a, &b| app.regions[b].pixel_count.cmp(&app.regions[a].pixel_count));
+
+        for &i in sorted.iter().take(MAX_LABELED_REGIONS) {
+            let r = &app.regions[i];
             let cx = img_rect.min.x + r.centroid.0 * disp.x;
             let cy = img_rect.min.y + r.centroid.1 * disp.y;
             let lbl = r.index.to_string();
@@ -82,7 +97,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
             painter.text(egui::pos2(cx, cy), egui::Align2::CENTER_CENTER, &lbl, font.clone(), egui::Color32::WHITE);
         }
     }
-    // </region labels>
+    // </region labels, only the top 5 largest by pixel count>
 }
 // </canvas panel>
 
