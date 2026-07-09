@@ -16,6 +16,21 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         ui.add_space(5.0);
 
         ui.horizontal_wrapped(|ui| {
+            // <reset button>
+            if ui.button("🔄  Reset").on_hover_text("Clear everything and start over").clicked() {
+                let gpu_ctx = app.gpu_ctx.take();
+                let gpu_available = app.gpu_available;
+                let gpu_is_discrete = app.gpu_is_discrete;
+                *app = App::default();
+                app.gpu_ctx = gpu_ctx;
+                app.gpu_available = gpu_available;
+                app.gpu_is_discrete = gpu_is_discrete;
+                app.gpu_enabled = gpu_is_discrete;
+            }
+            // </reset button>
+
+            ui.separator();
+
             show_load_button(app, ctx, ui);
             ui.separator();
             show_calibration(app, ctx, ui);
@@ -57,7 +72,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             ui.separator();
             ui.label("Segment engine:");
             ui.selectable_value(&mut app.use_parallel_segment, true, "Parallel")
-                .on_hover_text("Splits the image into strips and segments them on multiple CPU cores. Fast, but regions that straddle a strip boundary are merged after the fact and may very rarely differ slightly from the exact result.");
+                .on_hover_text("Splits the image into strips and segments them on multiple CPU cores. Fast, but regions that straddle a strip boundary may very rarely differ slightly from the exact result.");
             ui.selectable_value(&mut app.use_parallel_segment, false, "Exact")
                 .on_hover_text("Single-threaded, identical to the original algorithm. Slower on large images.");
 
@@ -97,16 +112,12 @@ fn show_load_button(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
             match image::open(&path) {
                 Ok(img) => {
                     app.status = "Decoding image...".into();
-
                     let rgb = img.to_rgb8();
                     let ci = dyn_to_color_image(&img);
-
                     app.orig_tex = Some(ctx.load_texture("orig", ci, TextureOptions::default()));
                     app.img_w = img.width();
                     app.img_h = img.height();
-
                     app.prominent_filter_indices = compute_prominent_filters(&rgb, &app.color_filters, 0.05);
-
                     app.image = Some(img);
                     app.rgb_cache = Some(rgb);
                     app.seg_tex = None;
@@ -192,7 +203,6 @@ fn show_segment_button(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
     {
         if let (Some(rgb), Some(scale)) = (&app.rgb_cache, app.scale_px_per_cm) {
             app.status = "Segmenting...".into();
-
             let processed = box_blur(rgb, app.blur_radius);
             let (labels, regions) = if app.use_parallel_segment {
                 segment_parallel(&processed, app.tolerance, app.min_pixels, scale)
