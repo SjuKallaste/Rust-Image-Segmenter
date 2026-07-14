@@ -1,9 +1,36 @@
 use egui::{Rect, TextureHandle};
 use image::{DynamicImage, RgbImage};
 use std::collections::HashSet;
+use std::sync::mpsc;
 
 use crate::color::{all_color_filters, ColorFilter};
 use crate::types::{Mode, Region, Unit};
+
+// <task state, what background work is currently running>
+pub enum TaskKind {
+    Loading,
+    Segmenting,
+    Filtering,
+}
+
+pub struct TaskResult {
+    pub kind: TaskKind,
+    pub payload: TaskPayload,
+}
+
+pub enum TaskPayload {
+    Loaded {
+        image: DynamicImage,
+        rgb: RgbImage,
+        prominent: Vec<usize>,
+    },
+    Segmented {
+        labels: Vec<i32>,
+        regions: Vec<Region>,
+    },
+    Filtered,
+}
+// </task state, what background work is currently running>
 
 // <app state>
 pub struct App {
@@ -48,16 +75,18 @@ pub struct App {
     pub imagej_bri_min: u8,
     pub imagej_bri_max: u8,
 
-    // <gpu acceleration, for the color filter / imagej area scan>
     pub gpu_ctx: Option<crate::gpu::GpuContext>,
     pub gpu_enabled: bool,
     pub gpu_available: bool,
     pub gpu_is_discrete: bool,
-    // </gpu acceleration, for the color filter / imagej area scan>
 
-    // <segmentation engine choice, single threaded exact vs parallel approximate>
     pub use_parallel_segment: bool,
-    // </segmentation engine choice, single threaded exact vs parallel approximate>
+
+    // <background task channel>
+    // None = idle, Some = work in progress
+    pub task_rx: Option<mpsc::Receiver<TaskResult>>,
+    pub task_label: Option<String>,
+    // </background task channel>
 
     pub status: String,
 }
@@ -105,6 +134,8 @@ impl Default for App {
             gpu_available: false,
             gpu_is_discrete: false,
             use_parallel_segment: true,
+            task_rx: None,
+            task_label: None,
             status: "Step 1: Load an image.".into(),
         };
 

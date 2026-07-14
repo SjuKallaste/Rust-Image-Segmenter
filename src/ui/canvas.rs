@@ -24,6 +24,11 @@ pub fn show(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
                         .color(egui::Color32::GRAY),
                 );
             });
+            // <loading card when no image yet>
+            if app.task_label.is_some() {
+                draw_loading_card(ctx, ui, app);
+            }
+            // </loading card when no image yet>
             return;
         }
         Some(t) => t,
@@ -39,15 +44,22 @@ pub fn show(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
     // </fit image to panel>
 
     // <input sense and cursor>
-    let sense = match &app.mode {
-        Mode::CalibP1 | Mode::CalibP2 { .. } | Mode::Segmented => egui::Sense::click(),
-        _ => egui::Sense::hover(),
+    let busy = app.task_label.is_some();
+    let sense = if busy {
+        egui::Sense::hover()
+    } else {
+        match &app.mode {
+            Mode::CalibP1 | Mode::CalibP2 { .. } | Mode::Segmented => egui::Sense::click(),
+            _ => egui::Sense::hover(),
+        }
     };
     let response = ui.allocate_rect(img_rect, sense);
-    match &app.mode {
-        Mode::CalibP1 | Mode::CalibP2 { .. } => ctx.set_cursor_icon(egui::CursorIcon::Crosshair),
-        Mode::Segmented => ctx.set_cursor_icon(egui::CursorIcon::PointingHand),
-        _ => {}
+    if !busy {
+        match &app.mode {
+            Mode::CalibP1 | Mode::CalibP2 { .. } => ctx.set_cursor_icon(egui::CursorIcon::Crosshair),
+            Mode::Segmented => ctx.set_cursor_icon(egui::CursorIcon::PointingHand),
+            _ => {}
+        }
     }
     // </input sense and cursor>
 
@@ -70,24 +82,22 @@ pub fn show(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
     }
     // </edge overlay>
 
-    // <click handling>
-    if response.clicked() {
+    // <click handling, disabled while busy>
+    if !busy && response.clicked() {
         if let Some(pos) = response.interact_pointer_pos() {
             handle_click(app, ctx, pos, img_rect);
         }
     }
-    // </click handling>
+    // </click handling, disabled while busy>
 
     draw_calib_overlay(app, ui, img_rect);
 
     // <region labels, only the top 5 largest by pixel count>
-    if app.show_seg && !app.regions.is_empty() {
+    if app.show_seg && !app.regions.is_empty() && !busy {
         let font = egui::FontId::proportional(14.0);
         let painter = ui.painter();
-
         let mut sorted: Vec<usize> = (0..app.regions.len()).collect();
         sorted.sort_by(|&a, &b| app.regions[b].pixel_count.cmp(&app.regions[a].pixel_count));
-
         for &i in sorted.iter().take(MAX_LABELED_REGIONS) {
             let r = &app.regions[i];
             let cx = img_rect.min.x + r.centroid.0 * disp.x;
@@ -98,8 +108,59 @@ pub fn show(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
         }
     }
     // </region labels, only the top 5 largest by pixel count>
+
+    // <loading card overlay, drawn on top of image while busy>
+    if busy {
+        draw_loading_card(ctx, ui, app);
+    }
+    // </loading card overlay, drawn on top of image while busy>
 }
 // </canvas panel>
+
+// <loading card>
+fn draw_loading_card(ctx: &egui::Context, ui: &mut egui::Ui, app: &App) {
+    let label = app.task_label.as_deref().unwrap_or("Working");
+    let panel_rect = ui.max_rect();
+
+    let compute_label = if app.gpu_enabled && app.gpu_available {
+        "using GPU"
+    } else {
+        "using CPU"
+    };
+
+    // animated dots: . .. ... . .. ...
+    let t = ctx.input(|i| i.time) as f32;
+    let dot_phase = ((t * 1.5) as usize) % 3;
+    let dots = match dot_phase {
+        0 => ".",
+        1 => "..",
+        _ => "...",
+    };
+
+    let display = format!("{} {} {}", label, compute_label, dots);
+
+    // dim the background
+    ui.painter().rect_filled(panel_rect, 0.0, egui::Color32::from_black_alpha(120));
+
+    // card — wider, shorter, less rounding = more rectangular
+    let card_w = 320.0f32;
+    let card_h = 52.0f32;
+    let card_rect = Rect::from_center_size(panel_rect.center(), Vec2::new(card_w, card_h));
+
+    ui.painter().rect_filled(card_rect, 6.0, egui::Color32::from_rgba_unmultiplied(30, 30, 30, 230));
+    ui.painter().rect_stroke(card_rect, 6.0, egui::Stroke::new(1.5, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 40)));
+
+    ui.painter().text(
+        card_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        &display,
+        egui::FontId::proportional(15.0),
+        egui::Color32::WHITE,
+    );
+
+    ctx.request_repaint();
+}
+// </loading card>
 
 // <click handler>
 fn handle_click(app: &mut App, ctx: &egui::Context, pos: Pos2, img_rect: Rect) {

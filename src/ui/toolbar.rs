@@ -1,8 +1,9 @@
 use egui::TextureOptions;
 use rfd::FileDialog;
 use std::collections::HashSet;
+use std::sync::mpsc;
 
-use crate::app::App;
+use crate::app::{App, TaskKind, TaskPayload, TaskResult};
 use crate::color::{build_color_filter_texture, compute_prominent_filters};
 use crate::imaging::{box_blur, build_seg_texture, dyn_to_color_image, sobel_texture};
 use crate::export::export_csv;
@@ -12,12 +13,19 @@ use crate::ui::calib::norm_to_px_dist;
 
 // <toolbar panel>
 pub fn show(app: &mut App, ctx: &egui::Context) {
+    poll_task(app, ctx);
+
     egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
         ui.add_space(5.0);
 
+        let busy = app.task_rx.is_some();
+
         ui.horizontal_wrapped(|ui| {
             // <reset button>
-            if ui.button("🔄  Reset").on_hover_text("Clear everything and start over").clicked() {
+            if ui.add_enabled(!busy, egui::Button::new("🔄  Reset"))
+                .on_hover_text("Clear everything and start over")
+                .clicked()
+            {
                 let gpu_ctx = app.gpu_ctx.take();
                 let gpu_available = app.gpu_available;
                 let gpu_is_discrete = app.gpu_is_discrete;
@@ -30,17 +38,16 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             // </reset button>
 
             ui.separator();
-
-            show_load_button(app, ctx, ui);
+            show_load_button(app, ctx, ui, busy);
             ui.separator();
-            show_calibration(app, ctx, ui);
+            show_calibration(app, ctx, ui, busy);
 
             if let Some(s) = app.scale_px_per_cm {
                 ui.colored_label(egui::Color32::from_rgb(100, 220, 100), format!("✔ {:.3} px/cm", s));
             }
 
             ui.separator();
-            show_segment_button(app, ctx, ui);
+            show_segment_button(app, ctx, ui, busy);
             ui.separator();
 
             if app.seg_tex.is_some() {
@@ -50,7 +57,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             }
 
             ui.label("Unit:");
-            egui::ComboBox::from_id_salt("unit_sel")
+            egui::ComboBox::from_id_source("unit_sel")
                 .selected_text(app.unit.label())
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut app.unit, Unit::Cm2, "cm²");
@@ -61,22 +68,21 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         ui.add_space(3.0);
 
         ui.horizontal_wrapped(|ui| {
-            ui.label("Colour tol:");
-            ui.add(egui::Slider::new(&mut app.tolerance, 5..=255));
-            ui.label("Min px:");
-            ui.add(egui::Slider::new(&mut app.min_pixels, 50..=50_000));
-            ui.label("Blur:");
-            ui.add(egui::Slider::new(&mut app.blur_radius, 0..=15))
+            ui.add_enabled(!busy, egui::Slider::new(&mut app.tolerance, 5..=255).text("Colour tol"));
+            ui.add_enabled(!busy, egui::Slider::new(&mut app.min_pixels, 50..=50_000).text("Min px"));
+            ui.add_enabled(!busy, egui::Slider::new(&mut app.blur_radius, 0..=15).text("Blur"))
                 .on_hover_text("Box blur radius before segmentation (0 = off)");
 
             ui.separator();
             ui.label("Segment engine:");
-            ui.selectable_value(&mut app.use_parallel_segment, true, "Parallel")
-                .on_hover_text("Splits the image into strips and segments them on multiple CPU cores. Fast, but regions that straddle a strip boundary may very rarely differ slightly from the exact result.");
-            ui.selectable_value(&mut app.use_parallel_segment, false, "Exact")
-                .on_hover_text("Single-threaded, identical to the original algorithm. Slower on large images.");
+            ui.add_enabled(!busy, egui::SelectableLabel::new(app.use_parallel_segment, "Parallel"))
+                .on_hover_text("Fast, multi-core. Rare seam edge cases at strip boundaries.")
+                .clicked().then(|| app.use_parallel_segment = true);
+            ui.add_enabled(!busy, egui::SelectableLabel::new(!app.use_parallel_segment, "Exact"))
+                .on_hover_text("Single-threaded, identical to the original algorithm.")
+                .clicked().then(|| app.use_parallel_segment = false);
 
-            if !app.regions.is_empty() {
+            if !app.regions.is_empty() && !busy {
                 ui.separator();
                 if ui.button("☑ Select All").clicked() {
                     app.selected = (0..app.regions.len()).collect();
@@ -102,48 +108,124 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
 }
 // </toolbar panel>
 
-// <load image, builds the rgb cache once here>
-fn show_load_button(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
-    if ui.button("📂  Load Image").clicked() {
+// <poll background task, call once per frame before rendering>
+fn poll_task(app: &mut App, ctx: &egui::Context) {
+    let result = if let Some(rx) = &app.task_rx {
+        match rx.try_recv() {
+            Ok(r) => Some(r),
+            Err(mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint();
+                return;
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                app.task_rx = None;
+                app.task_label = None;
+                return;
+            }
+        }
+    } else {
+        return;
+    };
+
+    app.task_rx = None;
+    app.task_label = None;
+
+    let result = match result {
+        Some(r) => r,
+        None => return,
+    };
+
+    match result.payload {
+        // <handle completed image load>
+        TaskPayload::Loaded { image, rgb, prominent } => {
+            let ci = dyn_to_color_image(&image);
+            app.orig_tex = Some(ctx.load_texture("orig", ci, TextureOptions::default()));
+            app.img_w = image.width();
+            app.img_h = image.height();
+            app.prominent_filter_indices = prominent;
+            app.image = Some(image);
+            app.rgb_cache = Some(rgb);
+            app.seg_tex = None;
+            app.edge_tex = None;
+            app.color_filter_tex = None;
+            app.show_seg = false;
+            app.show_edges = false;
+            app.active_color_filters.clear();
+            app.scale_px_per_cm = None;
+            app.label_map.clear();
+            app.regions.clear();
+            app.selected.clear();
+            app.total_area_cm2 = 0.0;
+            app.mode = Mode::Ready;
+            app.show_all_colors = false;
+            app.status = format!("Loaded ({} × {} px). Step 2 - Set Scale.", app.img_w, app.img_h);
+        }
+        // </handle completed image load>
+
+        // <handle completed segmentation>
+        TaskPayload::Segmented { labels, regions } => {
+            let n = regions.len();
+            let ci_seg = build_seg_texture(&labels, app.img_w, app.img_h, n, &HashSet::new());
+            app.seg_tex = Some(ctx.load_texture("seg", ci_seg, TextureOptions::default()));
+
+            if let Some(rgb) = &app.rgb_cache {
+                let processed = box_blur(rgb, app.blur_radius);
+                let ci_edge = sobel_texture(&processed);
+                app.edge_tex = Some(ctx.load_texture("edge", ci_edge, TextureOptions::default()));
+
+                if !app.active_color_filters.is_empty() {
+                    let active_refs: Vec<&_> = app.active_color_filters.iter().map(|&i| &app.color_filters[i]).collect();
+                    let ci_cf = build_color_filter_texture(rgb, &active_refs);
+                    app.color_filter_tex = Some(ctx.load_texture("cf", ci_cf, TextureOptions::default()));
+                }
+            }
+
+            let engine = if app.use_parallel_segment { "parallel" } else { "exact" };
+            app.total_area_cm2 = regions.iter().map(|r| r.area_cm2).sum();
+            app.label_map = labels;
+            app.regions = regions;
+            app.selected.clear();
+            app.show_seg = true;
+            app.show_edges = false;
+            app.mode = Mode::Segmented;
+            app.status = format!("Done ({engine}) - {n} region(s) found. Click any region to select it.");
+        }
+        // </handle completed segmentation>
+
+        TaskPayload::Filtered => {}
+    }
+}
+// </poll background task, call once per frame before rendering>
+
+// <load image, spawns background thread>
+fn show_load_button(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui, busy: bool) {
+    if ui.add_enabled(!busy, egui::Button::new("📂  Load Image")).clicked() {
         if let Some(path) = FileDialog::new()
             .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "tiff", "webp"])
             .pick_file()
         {
-            match image::open(&path) {
-                Ok(img) => {
-                    app.status = "Decoding image...".into();
+            let filters = app.color_filters.clone();
+            let (tx, rx) = mpsc::channel();
+            app.task_rx = Some(rx);
+            app.task_label = Some("Loading image...".into());
+
+            std::thread::spawn(move || {
+                if let Ok(img) = image::open(&path) {
                     let rgb = img.to_rgb8();
-                    let ci = dyn_to_color_image(&img);
-                    app.orig_tex = Some(ctx.load_texture("orig", ci, TextureOptions::default()));
-                    app.img_w = img.width();
-                    app.img_h = img.height();
-                    app.prominent_filter_indices = compute_prominent_filters(&rgb, &app.color_filters, 0.05);
-                    app.image = Some(img);
-                    app.rgb_cache = Some(rgb);
-                    app.seg_tex = None;
-                    app.edge_tex = None;
-                    app.color_filter_tex = None;
-                    app.show_seg = false;
-                    app.show_edges = false;
-                    app.active_color_filters.clear();
-                    app.scale_px_per_cm = None;
-                    app.label_map.clear();
-                    app.regions.clear();
-                    app.selected.clear();
-                    app.total_area_cm2 = 0.0;
-                    app.mode = Mode::Ready;
-                    app.show_all_colors = false;
-                    app.status = format!("Loaded ({} × {} px). Step 2 - Set Scale.", app.img_w, app.img_h);
+                    let prominent = compute_prominent_filters(&rgb, &filters, 0.05);
+                    let _ = tx.send(TaskResult {
+                        kind: TaskKind::Loading,
+                        payload: TaskPayload::Loaded { image: img, rgb, prominent },
+                    });
                 }
-                Err(e) => app.status = format!("Error: {e}"),
-            }
+            });
         }
     }
 }
-// </load image, builds the rgb cache once here>
+// </load image, spawns background thread>
 
 // <calibration controls>
-fn show_calibration(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
+fn show_calibration(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui, busy: bool) {
     match app.mode.clone() {
         Mode::CalibP1 => {
             ui.colored_label(egui::Color32::YELLOW, "🎯 Click FIRST endpoint on image");
@@ -179,7 +261,7 @@ fn show_calibration(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
             }
         }
         _ => {
-            if ui.add_enabled(app.image.is_some(), egui::Button::new("📏  Set Scale"))
+            if ui.add_enabled(app.image.is_some() && !busy, egui::Button::new("📏  Set Scale"))
                 .on_hover_text("Draw a line over a known reference length to calibrate")
                 .clicked()
             {
@@ -191,46 +273,45 @@ fn show_calibration(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
 }
 // </calibration controls>
 
-// <segment button, picks engine based on app.use_parallel_segment>
-fn show_segment_button(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
+// <segment button, spawns background thread>
+fn show_segment_button(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui, busy: bool) {
     let can_seg = app.rgb_cache.is_some()
         && app.scale_px_per_cm.is_some()
+        && !busy
         && !matches!(app.mode, Mode::CalibP1 | Mode::CalibP2 { .. } | Mode::CalibLen { .. });
 
     if ui.add_enabled(can_seg, egui::Button::new("⚙  Segment"))
         .on_hover_text("Detect coloured regions and compute their areas")
         .clicked()
     {
-        if let (Some(rgb), Some(scale)) = (&app.rgb_cache, app.scale_px_per_cm) {
-            app.status = "Segmenting...".into();
-            let processed = box_blur(rgb, app.blur_radius);
-            let (labels, regions) = if app.use_parallel_segment {
-                segment_parallel(&processed, app.tolerance, app.min_pixels, scale)
+        if let (Some(rgb), Some(scale)) = (app.rgb_cache.clone(), app.scale_px_per_cm) {
+            let tol = app.tolerance;
+            let min_px = app.min_pixels;
+            let blur = app.blur_radius;
+            let parallel = app.use_parallel_segment;
+
+            let engine_label = if parallel {
+                "Segmenting (parallel)..."
             } else {
-                segment(&processed, app.tolerance, app.min_pixels, scale)
+                "Segmenting (exact)..."
             };
-            let n = regions.len();
-            let ci_seg = build_seg_texture(&labels, app.img_w, app.img_h, n, &HashSet::new());
-            let ci_edge = sobel_texture(&processed);
+            app.task_label = Some(engine_label.into());
+            let (tx, rx) = mpsc::channel();
+            app.task_rx = Some(rx);
 
-            if !app.active_color_filters.is_empty() {
-                let active_refs: Vec<&_> = app.active_color_filters.iter().map(|&i| &app.color_filters[i]).collect();
-                let ci_cf = build_color_filter_texture(rgb, &active_refs);
-                app.color_filter_tex = Some(ctx.load_texture("cf", ci_cf, TextureOptions::default()));
-            }
-
-            app.seg_tex = Some(ctx.load_texture("seg", ci_seg, TextureOptions::default()));
-            app.edge_tex = Some(ctx.load_texture("edge", ci_edge, TextureOptions::default()));
-            app.total_area_cm2 = regions.iter().map(|r| r.area_cm2).sum();
-            app.label_map = labels;
-            app.regions = regions;
-            app.selected.clear();
-            app.show_seg = true;
-            app.show_edges = false;
-            app.mode = Mode::Segmented;
-            let engine = if app.use_parallel_segment { "parallel" } else { "exact" };
-            app.status = format!("Done ({engine}) - {n} region(s) found. Click any region to select it.");
+            std::thread::spawn(move || {
+                let processed = box_blur(&rgb, blur);
+                let (labels, regions) = if parallel {
+                    segment_parallel(&processed, tol, min_px, scale)
+                } else {
+                    segment(&processed, tol, min_px, scale)
+                };
+                let _ = tx.send(TaskResult {
+                    kind: TaskKind::Segmenting,
+                    payload: TaskPayload::Segmented { labels, regions },
+                });
+            });
         }
     }
 }
-// </segment button, picks engine based on app.use_parallel_segment>
+// </segment button, spawns background thread>
