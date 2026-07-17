@@ -12,7 +12,41 @@ pub fn color_dist(a: [u8; 3], b: [u8; 3]) -> u32 {
 }
 // </color distance>
 
-// <single threaded flood fill, exact reference implementation>
+// <union find, shared by the parallel tiled merge and the gpu edge merge>
+// find() is iterative (not recursive) with path compression, and union()
+// unions by size. This matters specifically for segment_gpu, which creates
+// one Dsu entry per PIXEL (not per region), so a large connected area could
+// otherwise produce a recursion chain deep enough to overflow the stack.
+struct Dsu { parent: Vec<usize>, size: Vec<usize> }
+impl Dsu {
+    fn new(n: usize) -> Self { Dsu { parent: (0..n).collect(), size: vec![1; n] } }
+    fn find(&mut self, x: usize) -> usize {
+        let mut root = x;
+        while self.parent[root] != root {
+            root = self.parent[root];
+        }
+        let mut cur = x;
+        while self.parent[cur] != root {
+            let next = self.parent[cur];
+            self.parent[cur] = root;
+            cur = next;
+        }
+        root
+    }
+    fn union(&mut self, a: usize, b: usize) {
+        let mut ra = self.find(a);
+        let mut rb = self.find(b);
+        if ra == rb { return; }
+        if self.size[ra] < self.size[rb] {
+            std::mem::swap(&mut ra, &mut rb);
+        }
+        self.parent[rb] = ra;
+        self.size[ra] += self.size[rb];
+    }
+}
+// </union find, shared by the parallel tiled merge and the gpu edge merge>
+
+// <single threaded flood fill, exact reference implementation, seed based tolerance>
 pub fn segment(rgb: &RgbImage, tol: u32, min_px: usize, scale: f64) -> (Vec<i32>, Vec<Region>) {
     let w = rgb.width() as usize;
     let h = rgb.height() as usize;
@@ -63,9 +97,9 @@ pub fn segment(rgb: &RgbImage, tol: u32, min_px: usize, scale: f64) -> (Vec<i32>
 
     finalize_regions(labels, &counts, &color_sum, &cx_sum, &cy_sum, w, h, min_px, scale)
 }
-// </single threaded flood fill, exact reference implementation>
+// </single threaded flood fill, exact reference implementation, seed based tolerance>
 
-// <parallel flood fill, tiled with union-find seam merge>
+// <parallel flood fill, tiled with union find seam merge, seed based tolerance>
 pub fn segment_parallel(rgb: &RgbImage, tol: u32, min_px: usize, scale: f64) -> (Vec<i32>, Vec<Region>) {
     let w = rgb.width() as usize;
     let h = rgb.height() as usize;
@@ -129,7 +163,6 @@ pub fn segment_parallel(rgb: &RgbImage, tol: u32, min_px: usize, scale: f64) -> 
         StripResult { y0, y1, local_labels, seed_colors }
     }).collect();
 
-    // <assign global label ids, one contiguous range per strip>
     let mut strip_offsets = vec![0usize; strip_results.len()];
     let mut running = 0usize;
     for (i, sr) in strip_results.iter().enumerate() {
@@ -137,26 +170,8 @@ pub fn segment_parallel(rgb: &RgbImage, tol: u32, min_px: usize, scale: f64) -> 
         running += sr.seed_colors.len();
     }
     let total_local_labels = running;
-    // </assign global label ids, one contiguous range per strip>
 
-    // <union find>
-    struct Dsu { parent: Vec<usize> }
-    impl Dsu {
-        fn new(n: usize) -> Self { Dsu { parent: (0..n).collect() } }
-        fn find(&mut self, x: usize) -> usize {
-            if self.parent[x] != x {
-                self.parent[x] = self.find(self.parent[x]);
-            }
-            self.parent[x]
-        }
-        fn union(&mut self, a: usize, b: usize) {
-            let ra = self.find(a);
-            let rb = self.find(b);
-            if ra != rb { self.parent[ra] = rb; }
-        }
-    }
     let mut dsu = Dsu::new(total_local_labels);
-    // </union find>
 
     let mut global_labels = vec![-1i32; w * h];
     for (i, sr) in strip_results.iter().enumerate() {
@@ -171,7 +186,6 @@ pub fn segment_parallel(rgb: &RgbImage, tol: u32, min_px: usize, scale: f64) -> 
         }
     }
 
-    // <seam merge between adjacent strips>
     for i in 0..strip_results.len().saturating_sub(1) {
         let sr_top = &strip_results[i];
         let sr_bot = &strip_results[i + 1];
@@ -194,14 +208,56 @@ pub fn segment_parallel(rgb: &RgbImage, tol: u32, min_px: usize, scale: f64) -> 
             }
         }
     }
-    // </seam merge between adjacent strips>
 
-    // <resolve every pixel through dsu to its root, then compact roots>
+    let (final_labels, n_compact) = resolve_dsu(&mut dsu, &global_labels, w, h);
+    let (counts, color_sum, cx_sum, cy_sum) = accumulate_stats(rgb, &final_labels, n_compact, w, h);
+    finalize_regions(final_labels, &counts, &color_sum, &cx_sum, &cy_sum, w, h, min_px, scale)
+}
+// </parallel flood fill, tiled with union find seam merge, seed based tolerance>
+
+// <gpu segmentation, neighbor based (chained) tolerance>
+// Unlike segment() and segment_parallel(), this compares each pixel directly
+// to its immediate right/down neighbor rather than to a region seed. This is
+// a different, legitimate region-growing rule, but it can produce different
+// results on images with gradual color gradients: a smooth gradient stays
+// one region here even if its two ends differ by more than the tolerance,
+// where the seed based engines would split it.
+//
+// `edges` is one byte per pixel from gpu::gpu_compute_seg_edges: bit0 =
+// connected to right neighbor, bit1 = connected to down neighbor.
+pub fn segment_gpu(rgb: &RgbImage, edges: &[u8], min_px: usize, scale: f64) -> (Vec<i32>, Vec<Region>) {
+    let w = rgb.width() as usize;
+    let h = rgb.height() as usize;
+
+    let mut dsu = Dsu::new(w * h);
+
+    for y in 0..h {
+        for x in 0..w {
+            let idx = y * w + x;
+            let e = edges[idx];
+            if e & 1 != 0 && x + 1 < w {
+                dsu.union(idx, idx + 1);
+            }
+            if e & 2 != 0 && y + 1 < h {
+                dsu.union(idx, idx + w);
+            }
+        }
+    }
+
+    let identity_labels: Vec<i32> = (0..(w * h) as i32).collect();
+    let (final_labels, n_compact) = resolve_dsu(&mut dsu, &identity_labels, w, h);
+    let (counts, color_sum, cx_sum, cy_sum) = accumulate_stats(rgb, &final_labels, n_compact, w, h);
+    finalize_regions(final_labels, &counts, &color_sum, &cx_sum, &cy_sum, w, h, min_px, scale)
+}
+// </gpu segmentation, neighbor based (chained) tolerance>
+
+// <resolve dsu roots to compact contiguous ids>
+fn resolve_dsu(dsu: &mut Dsu, pre_labels: &[i32], w: usize, h: usize) -> (Vec<i32>, usize) {
     let mut root_to_compact: std::collections::HashMap<usize, i32> = std::collections::HashMap::new();
     let mut next_compact = 0i32;
     let mut final_labels = vec![-1i32; w * h];
     for idx in 0..(w * h) {
-        let l = global_labels[idx];
+        let l = pre_labels[idx];
         if l < 0 { continue; }
         let root = dsu.find(l as usize);
         let compact = *root_to_compact.entry(root).or_insert_with(|| {
@@ -211,32 +267,36 @@ pub fn segment_parallel(rgb: &RgbImage, tol: u32, min_px: usize, scale: f64) -> 
         });
         final_labels[idx] = compact;
     }
-    let n_compact = next_compact as usize;
-    // </resolve every pixel through dsu to its root, then compact roots>
+    (final_labels, next_compact as usize)
+}
+// </resolve dsu roots to compact contiguous ids>
 
+// <accumulate per region pixel stats from final labels>
+fn accumulate_stats(rgb: &RgbImage, labels: &[i32], n_compact: usize, w: usize, h: usize) -> (Vec<usize>, Vec<[u64; 3]>, Vec<u64>, Vec<u64>) {
+    let raw = rgb.as_raw();
     let mut counts = vec![0usize; n_compact];
     let mut color_sum = vec![[0u64; 3]; n_compact];
     let mut cx_sum = vec![0u64; n_compact];
     let mut cy_sum = vec![0u64; n_compact];
 
     for idx in 0..(w * h) {
-        let l = final_labels[idx];
+        let l = labels[idx];
         if l < 0 { continue; }
         let li = l as usize;
         let px = idx % w;
         let py = idx / w;
-        let c = pixels[idx];
+        let o = idx * 3;
         counts[li] += 1;
-        color_sum[li][0] += c[0] as u64;
-        color_sum[li][1] += c[1] as u64;
-        color_sum[li][2] += c[2] as u64;
+        color_sum[li][0] += raw[o] as u64;
+        color_sum[li][1] += raw[o + 1] as u64;
+        color_sum[li][2] += raw[o + 2] as u64;
         cx_sum[li] += px as u64;
         cy_sum[li] += py as u64;
     }
 
-    finalize_regions(final_labels, &counts, &color_sum, &cx_sum, &cy_sum, w, h, min_px, scale)
+    (counts, color_sum, cx_sum, cy_sum)
 }
-// </parallel flood fill, tiled with union-find seam merge>
+// </accumulate per region pixel stats from final labels>
 
 // <shared region finalization, filters by min_px and remaps to contiguous ids>
 fn finalize_regions(

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::sync::mpsc;
 
 use crate::color::{all_color_filters, ColorFilter};
-use crate::types::{Mode, Region, Unit};
+use crate::types::{Mode, Region, SegmentEngine, Unit};
 
 // <task state, what background work is currently running>
 pub enum TaskKind {
@@ -75,18 +75,19 @@ pub struct App {
     pub imagej_bri_min: u8,
     pub imagej_bri_max: u8,
 
+    // <gpu acceleration, used by both filter scanning and gpu segmentation>
     pub gpu_ctx: Option<crate::gpu::GpuContext>,
     pub gpu_enabled: bool,
     pub gpu_available: bool,
     pub gpu_is_discrete: bool,
+    // </gpu acceleration, used by both filter scanning and gpu segmentation>
 
-    pub use_parallel_segment: bool,
+    // <segmentation engine choice, exact / parallel cpu / gpu>
+    pub segment_engine: SegmentEngine,
+    // </segmentation engine choice, exact / parallel cpu / gpu>
 
-    // <background task channel>
-    // None = idle, Some = work in progress
     pub task_rx: Option<mpsc::Receiver<TaskResult>>,
     pub task_label: Option<String>,
-    // </background task channel>
 
     pub status: String,
 }
@@ -133,7 +134,7 @@ impl Default for App {
             gpu_enabled: false,
             gpu_available: false,
             gpu_is_discrete: false,
-            use_parallel_segment: true,
+            segment_engine: SegmentEngine::Parallel,
             task_rx: None,
             task_label: None,
             status: "Step 1: Load an image.".into(),

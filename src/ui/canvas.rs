@@ -24,26 +24,21 @@ pub fn show(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
                         .color(egui::Color32::GRAY),
                 );
             });
-            // <loading card when no image yet>
             if app.task_label.is_some() {
                 draw_loading_card(ctx, ui, app);
             }
-            // </loading card when no image yet>
             return;
         }
         Some(t) => t,
     };
 
-    // <fit image to panel>
     let avail = ui.available_size();
     let tex_size = tex.size_vec2();
     let fit = (avail.x / tex_size.x).min(avail.y / tex_size.y);
     let disp = tex_size * fit;
     let img_rect = Rect::from_center_size(ui.max_rect().center(), disp);
     app.img_rect = img_rect;
-    // </fit image to panel>
 
-    // <input sense and cursor>
     let busy = app.task_label.is_some();
     let sense = if busy {
         egui::Sense::hover()
@@ -61,9 +56,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
             _ => {}
         }
     }
-    // </input sense and cursor>
 
-    // <draw image or filter mask>
     let uv = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
     if !app.active_color_filters.is_empty() || app.imagej_mode {
         if let Some(cf_tex) = &app.color_filter_tex {
@@ -72,27 +65,21 @@ pub fn show(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
     } else {
         ui.painter().image(tex.id(), img_rect, uv, egui::Color32::WHITE);
     }
-    // </draw image or filter mask>
 
-    // <edge overlay>
     if app.show_edges {
         if let Some(et) = &app.edge_tex {
             ui.painter().image(et.id(), img_rect, uv, egui::Color32::WHITE);
         }
     }
-    // </edge overlay>
 
-    // <click handling, disabled while busy>
     if !busy && response.clicked() {
         if let Some(pos) = response.interact_pointer_pos() {
             handle_click(app, ctx, pos, img_rect);
         }
     }
-    // </click handling, disabled while busy>
 
     draw_calib_overlay(app, ui, img_rect);
 
-    // <region labels, only the top 5 largest by pixel count>
     if app.show_seg && !app.regions.is_empty() && !busy {
         let font = egui::FontId::proportional(14.0);
         let painter = ui.painter();
@@ -107,13 +94,10 @@ pub fn show(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
             painter.text(egui::pos2(cx, cy), egui::Align2::CENTER_CENTER, &lbl, font.clone(), egui::Color32::WHITE);
         }
     }
-    // </region labels, only the top 5 largest by pixel count>
 
-    // <loading card overlay, drawn on top of image while busy>
     if busy {
         draw_loading_card(ctx, ui, app);
     }
-    // </loading card overlay, drawn on top of image while busy>
 }
 // </canvas panel>
 
@@ -122,13 +106,19 @@ fn draw_loading_card(ctx: &egui::Context, ui: &mut egui::Ui, app: &App) {
     let label = app.task_label.as_deref().unwrap_or("Working");
     let panel_rect = ui.max_rect();
 
-    let compute_label = if app.gpu_enabled && app.gpu_available {
-        "using GPU"
+    // <derive compute label from what's actually running>
+    // The task_label already spells out the engine for segmentation (e.g.
+    // "Segmenting (GPU)"), so only append a compute label when it wouldn't
+    // be redundant, i.e. for image loading, which has no GPU path.
+    let compute_label = if label.starts_with("Loading") {
+        None
+    } else if label.contains("GPU") {
+        Some("on GPU")
     } else {
-        "using CPU"
+        Some("on CPU")
     };
+    // </derive compute label from what's actually running>
 
-    // animated dots: . .. ... . .. ...
     let t = ctx.input(|i| i.time) as f32;
     let dot_phase = ((t * 1.5) as usize) % 3;
     let dots = match dot_phase {
@@ -137,12 +127,13 @@ fn draw_loading_card(ctx: &egui::Context, ui: &mut egui::Ui, app: &App) {
         _ => "...",
     };
 
-    let display = format!("{} {} {}", label, compute_label, dots);
+    let display = match compute_label {
+        Some(c) => format!("{} {} {}", label, c, dots),
+        None => format!("{} {}", label, dots),
+    };
 
-    // dim the background
     ui.painter().rect_filled(panel_rect, 0.0, egui::Color32::from_black_alpha(120));
 
-    // card — wider, shorter, less rounding = more rectangular
     let card_w = 320.0f32;
     let card_h = 52.0f32;
     let card_rect = Rect::from_center_size(panel_rect.center(), Vec2::new(card_w, card_h));

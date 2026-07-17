@@ -29,6 +29,29 @@ impl Unit {
 }
 // </unit of measurement>
 
+// <segmentation engine choice>
+// Exact: single threaded, seed based tolerance, identical to the original algorithm.
+// Parallel: multi core CPU, tiled, seed based tolerance, seams merged via union find.
+// Gpu: neighbor based (chained) tolerance, computed on the GPU. Different semantics
+// from the seed based CPU engines, see comments in segment.rs / gpu.rs.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum SegmentEngine {
+    Exact,
+    Parallel,
+    Gpu,
+}
+
+impl SegmentEngine {
+    pub fn label(&self) -> &'static str {
+        match self {
+            SegmentEngine::Exact => "Exact",
+            SegmentEngine::Parallel => "Parallel",
+            SegmentEngine::Gpu => "GPU",
+        }
+    }
+}
+// </segmentation engine choice>
+
 // <region data>
 #[derive(Clone)]
 pub struct Region {

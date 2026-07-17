@@ -5,10 +5,11 @@ use std::sync::mpsc;
 
 use crate::app::{App, TaskKind, TaskPayload, TaskResult};
 use crate::color::{build_color_filter_texture, compute_prominent_filters};
+use crate::gpu::gpu_compute_seg_edges;
 use crate::imaging::{box_blur, build_seg_texture, dyn_to_color_image, sobel_texture};
 use crate::export::export_csv;
-use crate::segment::{segment, segment_parallel};
-use crate::types::{Mode, Unit};
+use crate::segment::{segment, segment_gpu, segment_parallel};
+use crate::types::{Mode, SegmentEngine, Unit};
 use crate::ui::calib::norm_to_px_dist;
 
 // <toolbar panel>
@@ -21,7 +22,6 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         let busy = app.task_rx.is_some();
 
         ui.horizontal_wrapped(|ui| {
-            // <reset button>
             if ui.add_enabled(!busy, egui::Button::new("🔄  Reset"))
                 .on_hover_text("Clear everything and start over")
                 .clicked()
@@ -35,7 +35,6 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 app.gpu_is_discrete = gpu_is_discrete;
                 app.gpu_enabled = gpu_is_discrete;
             }
-            // </reset button>
 
             ui.separator();
             show_load_button(app, ctx, ui, busy);
@@ -75,12 +74,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
 
             ui.separator();
             ui.label("Segment engine:");
-            ui.add_enabled(!busy, egui::SelectableLabel::new(app.use_parallel_segment, "Parallel"))
-                .on_hover_text("Fast, multi-core. Rare seam edge cases at strip boundaries.")
-                .clicked().then(|| app.use_parallel_segment = true);
-            ui.add_enabled(!busy, egui::SelectableLabel::new(!app.use_parallel_segment, "Exact"))
-                .on_hover_text("Single-threaded, identical to the original algorithm.")
-                .clicked().then(|| app.use_parallel_segment = false);
+            show_engine_selector(app, ui, busy);
 
             if !app.regions.is_empty() && !busy {
                 ui.separator();
@@ -107,6 +101,33 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     });
 }
 // </toolbar panel>
+
+// <segment engine selector, exact / parallel / gpu>
+fn show_engine_selector(app: &mut App, ui: &mut egui::Ui, busy: bool) {
+    let hover_exact = "Single-threaded, identical to the original algorithm. Slower on large images.";
+    let hover_parallel = "Multi-core CPU. Fast, but regions straddling a strip boundary may very rarely differ slightly from the exact result.";
+    let hover_gpu = "Runs on the GPU using neighbor-to-neighbor tolerance instead of seed-based tolerance. Different (not identical) results from Exact/Parallel, especially on smooth color gradients.";
+
+    if ui.add_enabled(!busy, egui::SelectableLabel::new(app.segment_engine == SegmentEngine::Exact, "Exact"))
+        .on_hover_text(hover_exact).clicked()
+    {
+        app.segment_engine = SegmentEngine::Exact;
+    }
+    if ui.add_enabled(!busy, egui::SelectableLabel::new(app.segment_engine == SegmentEngine::Parallel, "Parallel"))
+        .on_hover_text(hover_parallel).clicked()
+    {
+        app.segment_engine = SegmentEngine::Parallel;
+    }
+
+    let gpu_enabled_for_seg = !busy && app.gpu_available;
+    if ui.add_enabled(gpu_enabled_for_seg, egui::SelectableLabel::new(app.segment_engine == SegmentEngine::Gpu, "GPU"))
+        .on_hover_text(if app.gpu_available { hover_gpu } else { "No compatible GPU found." })
+        .clicked()
+    {
+        app.segment_engine = SegmentEngine::Gpu;
+    }
+}
+// </segment engine selector, exact / parallel / gpu>
 
 // <poll background task, call once per frame before rendering>
 fn poll_task(app: &mut App, ctx: &egui::Context) {
@@ -136,7 +157,6 @@ fn poll_task(app: &mut App, ctx: &egui::Context) {
     };
 
     match result.payload {
-        // <handle completed image load>
         TaskPayload::Loaded { image, rgb, prominent } => {
             let ci = dyn_to_color_image(&image);
             app.orig_tex = Some(ctx.load_texture("orig", ci, TextureOptions::default()));
@@ -160,9 +180,7 @@ fn poll_task(app: &mut App, ctx: &egui::Context) {
             app.show_all_colors = false;
             app.status = format!("Loaded ({} × {} px). Step 2 - Set Scale.", app.img_w, app.img_h);
         }
-        // </handle completed image load>
 
-        // <handle completed segmentation>
         TaskPayload::Segmented { labels, regions } => {
             let n = regions.len();
             let ci_seg = build_seg_texture(&labels, app.img_w, app.img_h, n, &HashSet::new());
@@ -180,7 +198,7 @@ fn poll_task(app: &mut App, ctx: &egui::Context) {
                 }
             }
 
-            let engine = if app.use_parallel_segment { "parallel" } else { "exact" };
+            let engine = app.segment_engine.label();
             app.total_area_cm2 = regions.iter().map(|r| r.area_cm2).sum();
             app.label_map = labels;
             app.regions = regions;
@@ -190,7 +208,6 @@ fn poll_task(app: &mut App, ctx: &egui::Context) {
             app.mode = Mode::Segmented;
             app.status = format!("Done ({engine}) - {n} region(s) found. Click any region to select it.");
         }
-        // </handle completed segmentation>
 
         TaskPayload::Filtered => {}
     }
@@ -207,7 +224,7 @@ fn show_load_button(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui, busy
             let filters = app.color_filters.clone();
             let (tx, rx) = mpsc::channel();
             app.task_rx = Some(rx);
-            app.task_label = Some("Loading image...".into());
+            app.task_label = Some("Loading image".into());
 
             std::thread::spawn(move || {
                 if let Ok(img) = image::open(&path) {
@@ -273,7 +290,7 @@ fn show_calibration(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui, busy
 }
 // </calibration controls>
 
-// <segment button, spawns background thread>
+// <segment button, dispatches to exact / parallel / gpu on a background thread>
 fn show_segment_button(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui, busy: bool) {
     let can_seg = app.rgb_cache.is_some()
         && app.scale_px_per_cm.is_some()
@@ -288,24 +305,33 @@ fn show_segment_button(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui, b
             let tol = app.tolerance;
             let min_px = app.min_pixels;
             let blur = app.blur_radius;
-            let parallel = app.use_parallel_segment;
+            let engine = app.segment_engine;
+            let gpu_ctx = app.gpu_ctx.clone();
 
-            let engine_label = if parallel {
-                "Segmenting (parallel)..."
-            } else {
-                "Segmenting (exact)..."
-            };
-            app.task_label = Some(engine_label.into());
+            app.task_label = Some(format!("Segmenting ({})", engine.label()));
             let (tx, rx) = mpsc::channel();
             app.task_rx = Some(rx);
 
             std::thread::spawn(move || {
                 let processed = box_blur(&rgb, blur);
-                let (labels, regions) = if parallel {
-                    segment_parallel(&processed, tol, min_px, scale)
-                } else {
-                    segment(&processed, tol, min_px, scale)
+
+                let (labels, regions) = match engine {
+                    SegmentEngine::Exact => segment(&processed, tol, min_px, scale),
+                    SegmentEngine::Parallel => segment_parallel(&processed, tol, min_px, scale),
+                    SegmentEngine::Gpu => {
+                        // fall back to the parallel CPU engine if the GPU
+                        // context is missing or the dispatch fails for any
+                        // reason, so the user always gets a result
+                        match &gpu_ctx {
+                            Some(ctx) => match gpu_compute_seg_edges(ctx, &processed, tol) {
+                                Some(edges) => segment_gpu(&processed, &edges, min_px, scale),
+                                None => segment_parallel(&processed, tol, min_px, scale),
+                            },
+                            None => segment_parallel(&processed, tol, min_px, scale),
+                        }
+                    }
                 };
+
                 let _ = tx.send(TaskResult {
                     kind: TaskKind::Segmenting,
                     payload: TaskPayload::Segmented { labels, regions },
@@ -314,4 +340,4 @@ fn show_segment_button(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui, b
         }
     }
 }
-// </segment button, spawns background thread>
+// </segment button, dispatches to exact / parallel / gpu on a background thread>
