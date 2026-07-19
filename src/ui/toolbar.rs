@@ -9,125 +9,142 @@ use crate::gpu::gpu_compute_seg_edges;
 use crate::imaging::{box_blur, build_seg_texture, dyn_to_color_image, sobel_texture};
 use crate::export::export_csv;
 use crate::segment::{segment, segment_gpu, segment_parallel};
-use crate::types::{Mode, SegmentEngine, Unit};
+use crate::types::{Mode, SegmentEngine};
 use crate::ui::calib::norm_to_px_dist;
 
-// <toolbar panel>
+// <toolbar, classic menu bar plus a slim action row>
 pub fn show(app: &mut App, ctx: &egui::Context) {
     poll_task(app, ctx);
+    let busy = app.task_rx.is_some();
 
-    egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-        ui.add_space(5.0);
+    egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+        show_menu_bar(app, ctx, ui, busy);
+    });
 
-        let busy = app.task_rx.is_some();
-
+    egui::TopBottomPanel::top("action_row").show(ctx, |ui| {
+        ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
-            if ui.add_enabled(!busy, egui::Button::new("🔄  Reset"))
-                .on_hover_text("Clear everything and start over")
-                .clicked()
-            {
-                let gpu_ctx = app.gpu_ctx.take();
-                let gpu_available = app.gpu_available;
-                let gpu_is_discrete = app.gpu_is_discrete;
-                *app = App::default();
-                app.gpu_ctx = gpu_ctx;
-                app.gpu_available = gpu_available;
-                app.gpu_is_discrete = gpu_is_discrete;
-                app.gpu_enabled = gpu_is_discrete;
-            }
-
-            ui.separator();
             show_load_button(app, ctx, ui, busy);
             ui.separator();
             show_calibration(app, ctx, ui, busy);
-
             if let Some(s) = app.scale_px_per_cm {
-                ui.colored_label(egui::Color32::from_rgb(100, 220, 100), format!("✔ {:.3} px/cm", s));
+                ui.colored_label(egui::Color32::from_rgb(100, 200, 255), format!("✔ {:.3} px/cm", s));
             }
-
             ui.separator();
             show_segment_button(app, ctx, ui, busy);
-            ui.separator();
-
-            if app.seg_tex.is_some() {
-                ui.checkbox(&mut app.show_seg, "Segmented view");
-                ui.checkbox(&mut app.show_edges, "Edge overlay");
-                ui.separator();
-            }
-
-            ui.label("Unit:");
-            egui::ComboBox::from_id_source("unit_sel")
-                .selected_text(app.unit.label())
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut app.unit, Unit::Cm2, "cm²");
-                    ui.selectable_value(&mut app.unit, Unit::Mm2, "mm²");
-                });
         });
-
         ui.add_space(3.0);
-
         ui.horizontal_wrapped(|ui| {
-            ui.add_enabled(!busy, egui::Slider::new(&mut app.tolerance, 5..=255).text("Colour tol"));
-            ui.add_enabled(!busy, egui::Slider::new(&mut app.min_pixels, 50..=50_000).text("Min px"));
-            ui.add_enabled(!busy, egui::Slider::new(&mut app.blur_radius, 0..=15).text("Blur"))
-                .on_hover_text("Box blur radius before segmentation (0 = off)");
-
-            ui.separator();
-            ui.label("Segment engine:");
-            show_engine_selector(app, ui, busy);
-
-            if !app.regions.is_empty() && !busy {
-                ui.separator();
-                if ui.button("☑ Select All").clicked() {
-                    app.selected = (0..app.regions.len()).collect();
-                    let n = app.regions.len();
-                    let ci = build_seg_texture(&app.label_map, app.img_w, app.img_h, n, &app.selected);
-                    app.seg_tex = Some(ctx.load_texture("seg", ci, TextureOptions::default()));
-                }
-                if ui.add_enabled(!app.selected.is_empty(), egui::Button::new("✖ Clear Sel.")).clicked() {
-                    app.selected.clear();
-                    let n = app.regions.len();
-                    let ci = build_seg_texture(&app.label_map, app.img_w, app.img_h, n, &app.selected);
-                    app.seg_tex = Some(ctx.load_texture("seg", ci, TextureOptions::default()));
-                }
-                ui.separator();
-                if ui.button("💾  Export CSV").clicked() {
-                    app.status = export_csv(&app.regions, &app.unit);
-                }
-            }
+            show_slider_group(ui, busy, "Colour tol", &mut app.tolerance, |ui, v| {
+                ui.add(egui::Slider::new(v, 5..=255));
+            });
+            show_slider_group(ui, busy, "Min px", &mut app.min_pixels, |ui, v| {
+                ui.add(egui::Slider::new(v, 50..=50_000));
+            });
+            show_slider_group(ui, busy, "Blur", &mut app.blur_radius, |ui, v| {
+                ui.add(egui::Slider::new(v, 0..=15));
+            });
         });
-
         ui.add_space(4.0);
     });
 }
-// </toolbar panel>
+// </toolbar, classic menu bar plus a slim action row>
 
-// <segment engine selector, exact / parallel / gpu>
-fn show_engine_selector(app: &mut App, ui: &mut egui::Ui, busy: bool) {
-    let hover_exact = "Single-threaded, identical to the original algorithm. Slower on large images.";
-    let hover_parallel = "Multi-core CPU. Fast, but regions straddling a strip boundary may very rarely differ slightly from the exact result.";
-    let hover_gpu = "Runs on the GPU using neighbor-to-neighbor tolerance instead of seed-based tolerance. Different (not identical) results from Exact/Parallel, especially on smooth color gradients.";
-
-    if ui.add_enabled(!busy, egui::SelectableLabel::new(app.segment_engine == SegmentEngine::Exact, "Exact"))
-        .on_hover_text(hover_exact).clicked()
-    {
-        app.segment_engine = SegmentEngine::Exact;
-    }
-    if ui.add_enabled(!busy, egui::SelectableLabel::new(app.segment_engine == SegmentEngine::Parallel, "Parallel"))
-        .on_hover_text(hover_parallel).clicked()
-    {
-        app.segment_engine = SegmentEngine::Parallel;
-    }
-
-    let gpu_enabled_for_seg = !busy && app.gpu_available;
-    if ui.add_enabled(gpu_enabled_for_seg, egui::SelectableLabel::new(app.segment_engine == SegmentEngine::Gpu, "GPU"))
-        .on_hover_text(if app.gpu_available { hover_gpu } else { "No compatible GPU found." })
-        .clicked()
-    {
-        app.segment_engine = SegmentEngine::Gpu;
-    }
+// <generic collapsible slider group box>
+fn show_slider_group<T: Copy + std::fmt::Display>(
+    ui: &mut egui::Ui,
+    busy: bool,
+    title: &str,
+    value: &mut T,
+    body: impl FnOnce(&mut egui::Ui, &mut T),
+) {
+    let current = *value;
+    egui::Frame::group(ui.style())
+        .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+        .show(ui, |ui| {
+            ui.add_enabled_ui(!busy, |ui| {
+                egui::CollapsingHeader::new(format!("{title}: {current}"))
+                    .id_source(title)
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        body(ui, value);
+                    });
+            });
+        });
 }
-// </segment engine selector, exact / parallel / gpu>
+// </generic collapsible slider group box>
+
+// <classic menu bar: file / edit / view / settings>
+fn show_menu_bar(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui, busy: bool) {
+    egui::menu::bar(ui, |ui| {
+        ui.menu_button("File", |ui| {
+            if ui.add_enabled(!busy, egui::Button::new("📂  Load Image")).clicked() {
+                trigger_load(app, ui);
+                ui.close_menu();
+            }
+            if ui.add_enabled(!busy && !app.regions.is_empty(), egui::Button::new("💾  Export CSV")).clicked() {
+                app.status = export_csv(&app.regions, &app.unit);
+                ui.close_menu();
+            }
+            if ui.add_enabled(!busy, egui::Button::new("🔄  Reset")).clicked() {
+                do_reset(app);
+                ui.close_menu();
+            }
+            if ui.button("✖  Exit").clicked() {
+                std::process::exit(0);
+            }
+        });
+
+        ui.menu_button("Edit", |ui| {
+            let has_regions = !app.regions.is_empty();
+            if ui.add_enabled(!busy && has_regions, egui::Button::new("☑  Select All")).clicked() {
+                app.selected = (0..app.regions.len()).collect();
+                let n = app.regions.len();
+                let ci = build_seg_texture(&app.label_map, app.img_w, app.img_h, n, &app.selected);
+                app.seg_tex = Some(ctx.load_texture("seg", ci, TextureOptions::default()));
+                ui.close_menu();
+            }
+            if ui.add_enabled(!busy && !app.selected.is_empty(), egui::Button::new("✖  Clear Selection")).clicked() {
+                app.selected.clear();
+                let n = app.regions.len();
+                let ci = build_seg_texture(&app.label_map, app.img_w, app.img_h, n, &app.selected);
+                app.seg_tex = Some(ctx.load_texture("seg", ci, TextureOptions::default()));
+                ui.close_menu();
+            }
+        });
+
+        ui.menu_button("View", |ui| {
+            ui.add_enabled_ui(app.seg_tex.is_some(), |ui| {
+                ui.checkbox(&mut app.show_seg, "Segmented view");
+                ui.checkbox(&mut app.show_edges, "Edge overlay");
+            });
+        });
+
+        ui.menu_button("Settings", |ui| {
+            crate::ui::settings::show_inline(app, ui);
+        });
+
+        if let Some(label) = &app.task_label {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.colored_label(egui::Color32::from_rgb(100, 200, 255), label);
+            });
+        }
+    });
+}
+// </classic menu bar: file / edit / view / settings>
+
+// <shared reset logic, keeps the existing gpu context alive>
+fn do_reset(app: &mut App) {
+    let gpu_ctx = app.gpu_ctx.take();
+    let gpu_available = app.gpu_available;
+    let gpu_is_discrete = app.gpu_is_discrete;
+    *app = App::default();
+    app.gpu_ctx = gpu_ctx;
+    app.gpu_available = gpu_available;
+    app.gpu_is_discrete = gpu_is_discrete;
+    app.gpu_enabled = gpu_is_discrete;
+}
+// </shared reset logic, keeps the existing gpu context alive>
 
 // <poll background task, call once per frame before rendering>
 fn poll_task(app: &mut App, ctx: &egui::Context) {
@@ -214,42 +231,48 @@ fn poll_task(app: &mut App, ctx: &egui::Context) {
 }
 // </poll background task, call once per frame before rendering>
 
-// <load image, spawns background thread>
-fn show_load_button(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui, busy: bool) {
-    if ui.add_enabled(!busy, egui::Button::new("📂  Load Image")).clicked() {
-        if let Some(path) = FileDialog::new()
-            .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "tiff", "webp"])
-            .pick_file()
-        {
-            let filters = app.color_filters.clone();
-            let (tx, rx) = mpsc::channel();
-            app.task_rx = Some(rx);
-            app.task_label = Some("Loading image".into());
+// <trigger load, shared by File menu and action row button>
+fn trigger_load(app: &mut App, _ui: &mut egui::Ui) {
+    if let Some(path) = FileDialog::new()
+        .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "tiff", "webp"])
+        .pick_file()
+    {
+        let filters = app.color_filters.clone();
+        let (tx, rx) = mpsc::channel();
+        app.task_rx = Some(rx);
+        app.task_label = Some("Loading image".into());
 
-            std::thread::spawn(move || {
-                if let Ok(img) = image::open(&path) {
-                    let rgb = img.to_rgb8();
-                    let prominent = compute_prominent_filters(&rgb, &filters, 0.05);
-                    let _ = tx.send(TaskResult {
-                        kind: TaskKind::Loading,
-                        payload: TaskPayload::Loaded { image: img, rgb, prominent },
-                    });
-                }
-            });
-        }
+        std::thread::spawn(move || {
+            if let Ok(img) = image::open(&path) {
+                let rgb = img.to_rgb8();
+                let prominent = compute_prominent_filters(&rgb, &filters, 0.05);
+                let _ = tx.send(TaskResult {
+                    kind: TaskKind::Loading,
+                    payload: TaskPayload::Loaded { image: img, rgb, prominent },
+                });
+            }
+        });
     }
 }
-// </load image, spawns background thread>
+// </trigger load, shared by File menu and action row button>
+
+// <load button, action row>
+fn show_load_button(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui, busy: bool) {
+    if ui.add_enabled(!busy, egui::Button::new("📂  Load Image")).clicked() {
+        trigger_load(app, ui);
+    }
+}
+// </load button, action row>
 
 // <calibration controls>
 fn show_calibration(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui, busy: bool) {
     match app.mode.clone() {
         Mode::CalibP1 => {
-            ui.colored_label(egui::Color32::YELLOW, "🎯 Click FIRST endpoint on image");
+            ui.colored_label(egui::Color32::from_rgb(255, 210, 60), "🎯 Click FIRST endpoint on image");
             if ui.button("✖ Cancel").clicked() { app.mode = Mode::Ready; }
         }
         Mode::CalibP2 { .. } => {
-            ui.colored_label(egui::Color32::YELLOW, "🎯 Click SECOND endpoint on image");
+            ui.colored_label(egui::Color32::from_rgb(255, 210, 60), "🎯 Click SECOND endpoint on image");
             if ui.button("✖ Cancel").clicked() { app.mode = Mode::Ready; }
         }
         Mode::CalibLen { p1, p2 } => {
@@ -298,7 +321,7 @@ fn show_segment_button(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui, b
         && !matches!(app.mode, Mode::CalibP1 | Mode::CalibP2 { .. } | Mode::CalibLen { .. });
 
     if ui.add_enabled(can_seg, egui::Button::new("⚙  Segment"))
-        .on_hover_text("Detect coloured regions and compute their areas")
+        .on_hover_text("Detect coloured regions and compute their areas. Engine is chosen in Settings.")
         .clicked()
     {
         if let (Some(rgb), Some(scale)) = (app.rgb_cache.clone(), app.scale_px_per_cm) {
@@ -318,18 +341,13 @@ fn show_segment_button(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui, b
                 let (labels, regions) = match engine {
                     SegmentEngine::Exact => segment(&processed, tol, min_px, scale),
                     SegmentEngine::Parallel => segment_parallel(&processed, tol, min_px, scale),
-                    SegmentEngine::Gpu => {
-                        // fall back to the parallel CPU engine if the GPU
-                        // context is missing or the dispatch fails for any
-                        // reason, so the user always gets a result
-                        match &gpu_ctx {
-                            Some(ctx) => match gpu_compute_seg_edges(ctx, &processed, tol) {
-                                Some(edges) => segment_gpu(&processed, &edges, min_px, scale),
-                                None => segment_parallel(&processed, tol, min_px, scale),
-                            },
+                    SegmentEngine::Gpu => match &gpu_ctx {
+                        Some(ctx) => match gpu_compute_seg_edges(ctx, &processed, tol) {
+                            Some(edges) => segment_gpu(&processed, &edges, min_px, scale),
                             None => segment_parallel(&processed, tol, min_px, scale),
-                        }
-                    }
+                        },
+                        None => segment_parallel(&processed, tol, min_px, scale),
+                    },
                 };
 
                 let _ = tx.send(TaskResult {

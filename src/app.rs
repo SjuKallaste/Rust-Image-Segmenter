@@ -75,16 +75,12 @@ pub struct App {
     pub imagej_bri_min: u8,
     pub imagej_bri_max: u8,
 
-    // <gpu acceleration, used by both filter scanning and gpu segmentation>
     pub gpu_ctx: Option<crate::gpu::GpuContext>,
     pub gpu_enabled: bool,
     pub gpu_available: bool,
     pub gpu_is_discrete: bool,
-    // </gpu acceleration, used by both filter scanning and gpu segmentation>
 
-    // <segmentation engine choice, exact / parallel cpu / gpu>
     pub segment_engine: SegmentEngine,
-    // </segmentation engine choice, exact / parallel cpu / gpu>
 
     pub task_rx: Option<mpsc::Receiver<TaskResult>>,
     pub task_label: Option<String>,

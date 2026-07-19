@@ -39,8 +39,6 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             } else {
                 show_named_panel(app, ctx, ui);
             }
-
-            show_engine_settings(app, ui);
         });
 }
 // </side panel>
@@ -121,38 +119,6 @@ fn show_imagej_panel(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
     if changed { rebuild_filter_texture(app, ctx); }
 }
 // </imagej hsb sliders>
-
-// <advanced settings: explicit cpu/gpu choice for color filtering>
-fn show_engine_settings(app: &mut App, ui: &mut egui::Ui) {
-    ui.add_space(6.0);
-    ui.separator();
-    ui.label(egui::RichText::new("Advanced").small().strong());
-
-    ui.label(egui::RichText::new("Color filter scanning:").small());
-    ui.horizontal(|ui| {
-        ui.selectable_value(&mut app.gpu_enabled, false, "CPU");
-        if app.gpu_available {
-            ui.selectable_value(&mut app.gpu_enabled, true, "GPU");
-        } else {
-            ui.add_enabled(false, egui::SelectableLabel::new(false, "GPU"));
-        }
-    });
-
-    if !app.gpu_available {
-        ui.label(
-            egui::RichText::new("No compatible GPU found.\nCPU only.")
-                .italics().small().color(egui::Color32::GRAY),
-        );
-    } else if app.gpu_enabled {
-        let note = if app.gpu_is_discrete {
-            "Discrete GPU."
-        } else {
-            "Integrated/virtual GPU,\nmay not be faster than CPU."
-        };
-        ui.label(egui::RichText::new(note).italics().small().color(egui::Color32::GRAY));
-    }
-}
-// </advanced settings: explicit cpu/gpu choice for color filtering>
 
 // <rebuild filter texture, reads app.rgb_cache instead of re-converting>
 pub fn rebuild_filter_texture(app: &mut App, ctx: &egui::Context) {
