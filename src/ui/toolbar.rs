@@ -64,7 +64,7 @@ fn show_slider_group<T: Copy + std::fmt::Display>(
         .show(ui, |ui| {
             ui.add_enabled_ui(!busy, |ui| {
                 egui::CollapsingHeader::new(format!("{title}: {current}"))
-                    .id_source(title)
+                    .id_salt(title)
                     .default_open(false)
                     .show(ui, |ui| {
                         body(ui, value);

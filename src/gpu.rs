@@ -1,9 +1,9 @@
 use image::RgbImage;
 use wgpu::util::DeviceExt;
 
-// <gpu size threshold>
+// <gpu size threshold, for the imagej area scan opt-in default>
 pub const GPU_PIXEL_THRESHOLD: u32 = 4000 * 2250;
-// </gpu size threshold>
+// </gpu size threshold, for the imagej area scan opt-in default>
 
 // <filter params, mirrors the wgsl FilterParams struct field order and types>
 #[repr(C)]
@@ -32,10 +32,11 @@ struct SegParams {
 // </seg edge params, mirrors the wgsl SegParams struct field order and types>
 
 // <gpu context, holds device/queue plus both compute pipelines>
-// wgpu's Device/Queue/ComputePipeline/BindGroupLayout do not implement
-// Clone directly, so each handle is wrapped in an Arc to make GpuContext
-// cheaply cloneable. Deref coercion means call sites that use &ctx.device,
-// ctx.queue.submit(...), etc. keep working unchanged.
+// Fields are Arc-wrapped because wgpu::Device/Queue/ComputePipeline/
+// BindGroupLayout do not implement Clone themselves. Arc<T> is always
+// Clone regardless of T, cloning just bumps a reference count rather than
+// duplicating the underlying GPU resource, which is what we want when
+// sharing this context into a background thread.
 #[derive(Clone)]
 pub struct GpuContext {
     device: std::sync::Arc<wgpu::Device>,
@@ -45,6 +46,8 @@ pub struct GpuContext {
     seg_pipeline: std::sync::Arc<wgpu::ComputePipeline>,
     seg_bind_group_layout: std::sync::Arc<wgpu::BindGroupLayout>,
     pub is_discrete: bool,
+    max_storage_buffer_binding_size: u64,
+    max_buffer_size: u64,
 }
 // </gpu context, holds device/queue plus both compute pipelines>
 
@@ -67,16 +70,23 @@ pub fn try_init_gpu() -> Option<GpuContext> {
     }
     let is_discrete = info.device_type == wgpu::DeviceType::DiscreteGpu;
 
-    let limits = adapter.limits();
-    if limits.max_compute_workgroups_per_dimension == 0 {
+    // <request the gpu's real limits, not the artificially low downlevel defaults>
+    // downlevel_defaults() caps max_storage_buffer_binding_size at 128 MiB
+    // regardless of actual hardware capability, which silently breaks large
+    // images (a 42 megapixel image alone needs ~160 MiB just for the packed
+    // pixel buffer). Requesting the adapter's own limits asks for exactly
+    // what it already reports supporting, so this should always succeed.
+    let adapter_limits = adapter.limits();
+    if adapter_limits.max_compute_workgroups_per_dimension == 0 {
         return None;
     }
+    // </request the gpu's real limits, not the artificially low downlevel defaults>
 
     let (device, queue) = pollster::block_on(adapter.request_device(
         &wgpu::DeviceDescriptor {
             label: Some("image-segmenter-compute"),
             required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_defaults(),
+            required_limits: adapter_limits.clone(),
             ..Default::default()
         },
         None,
@@ -155,6 +165,8 @@ pub fn try_init_gpu() -> Option<GpuContext> {
         seg_pipeline: std::sync::Arc::new(seg_pipeline),
         seg_bind_group_layout: std::sync::Arc::new(seg_bind_group_layout),
         is_discrete,
+        max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size as u64,
+        max_buffer_size: adapter_limits.max_buffer_size,
     })
 }
 // </gpu init, returns none on any failure or insufficient hardware>
@@ -198,6 +210,14 @@ fn read_buffer(device: &wgpu::Device, buf: &wgpu::Buffer) -> Option<Vec<u8>> {
 }
 // </shared readback helper, maps a storage buffer and blocks until data is available>
 
+// <preflight size check, returns false if a buffer this large cannot be created>
+// Checked before any buffer creation so an oversized image fails cleanly
+// (the caller falls back to CPU) instead of hitting a wgpu validation panic.
+fn buffer_fits(ctx: &GpuContext, bytes: u64) -> bool {
+    bytes <= ctx.max_storage_buffer_binding_size && bytes <= ctx.max_buffer_size
+}
+// </preflight size check, returns false if a buffer this large cannot be created>
+
 // <gpu filter dispatch, takes a pre-converted rgb8 buffer>
 pub fn gpu_filter_imagej(
     ctx: &GpuContext,
@@ -209,6 +229,12 @@ pub fn gpu_filter_imagej(
     let w = rgb.width();
     let h = rgb.height();
     let n_pixels = (w * h) as usize;
+
+    let input_size = (n_pixels * 4) as u64;
+    let output_size_check = (n_pixels * 4) as u64;
+    if !buffer_fits(ctx, input_size) || !buffer_fits(ctx, output_size_check) {
+        return None;
+    }
 
     let packed: Vec<u32> = rgb.as_raw()
         .chunks_exact(3)
@@ -303,13 +329,17 @@ pub fn gpu_filter_imagej(
 // <gpu segmentation edge dispatch>
 // Computes, for every pixel, whether it is within `tol` of its right and
 // down neighbor. Returns one byte per pixel: bit0 = connected right,
-// bit1 = connected down. This is the only part of segmentation that runs
-// on the GPU, the union-find merge that turns these edges into regions
-// runs on the CPU in segment::segment_gpu.
+// bit1 = connected down.
 pub fn gpu_compute_seg_edges(ctx: &GpuContext, rgb: &RgbImage, tol: u32) -> Option<Vec<u8>> {
     let w = rgb.width();
     let h = rgb.height();
     let n_pixels = (w * h) as usize;
+
+    let input_size = (n_pixels * 4) as u64;
+    let output_size_check = (n_pixels * 4) as u64;
+    if !buffer_fits(ctx, input_size) || !buffer_fits(ctx, output_size_check) {
+        return None;
+    }
 
     let packed: Vec<u32> = rgb.as_raw()
         .chunks_exact(3)
@@ -324,8 +354,6 @@ pub fn gpu_compute_seg_edges(ctx: &GpuContext, rgb: &RgbImage, tol: u32) -> Opti
         usage: wgpu::BufferUsages::STORAGE,
     });
 
-    // output is one u32 per pixel for alignment simplicity, only the low
-    // byte is meaningful (values 0..=3)
     let output_size = (n_pixels * std::mem::size_of::<u32>()) as u64;
     let output_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("seg_edges_out"),
@@ -377,7 +405,6 @@ pub fn gpu_compute_seg_edges(ctx: &GpuContext, rgb: &RgbImage, tol: u32) -> Opti
 
     let raw = read_buffer(&ctx.device, &staging)?;
 
-    // unpack u32-per-pixel down to u8-per-pixel edge bitmasks
     let mut edges = Vec::with_capacity(n_pixels);
     for chunk in raw.chunks_exact(4) {
         edges.push(chunk[0]);
