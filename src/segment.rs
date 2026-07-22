@@ -216,30 +216,29 @@ pub fn segment_parallel(rgb: &RgbImage, tol: u32, min_px: usize, scale: f64) -> 
 // </parallel flood fill, tiled with union find seam merge, seed based tolerance>
 
 // <gpu segmentation, neighbor based (chained) tolerance>
-// Unlike segment() and segment_parallel(), this compares each pixel directly
-// to its immediate right/down neighbor rather than to a region seed. This is
-// a different, legitimate region-growing rule, but it can produce different
-// results on images with gradual color gradients: a smooth gradient stays
-// one region here even if its two ends differ by more than the tolerance,
-// where the seed based engines would split it.
-//
-// `edges` is one byte per pixel from gpu::gpu_compute_seg_edges: bit0 =
-// connected to right neighbor, bit1 = connected to down neighbor.
 pub fn segment_gpu(rgb: &RgbImage, edges: &[u8], min_px: usize, scale: f64) -> (Vec<i32>, Vec<Region>) {
     let w = rgb.width() as usize;
     let h = rgb.height() as usize;
 
+    // Defensive guard: if the GPU readback ever returns a buffer that
+    // doesn't match the expected pixel count, treat every pixel as
+    // disconnected rather than indexing out of bounds and panicking the
+    // background thread silently.
+    let edges_valid = edges.len() == w * h;
+
     let mut dsu = Dsu::new(w * h);
 
-    for y in 0..h {
-        for x in 0..w {
-            let idx = y * w + x;
-            let e = edges[idx];
-            if e & 1 != 0 && x + 1 < w {
-                dsu.union(idx, idx + 1);
-            }
-            if e & 2 != 0 && y + 1 < h {
-                dsu.union(idx, idx + w);
+    if edges_valid {
+        for y in 0..h {
+            for x in 0..w {
+                let idx = y * w + x;
+                let e = edges[idx];
+                if e & 1 != 0 && x + 1 < w {
+                    dsu.union(idx, idx + 1);
+                }
+                if e & 2 != 0 && y + 1 < h {
+                    dsu.union(idx, idx + w);
+                }
             }
         }
     }

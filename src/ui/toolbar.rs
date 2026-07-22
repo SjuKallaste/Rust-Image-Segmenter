@@ -1,6 +1,7 @@
 use egui::TextureOptions;
 use rfd::FileDialog;
 use std::collections::HashSet;
+use std::panic::AssertUnwindSafe;
 use std::sync::mpsc;
 
 use crate::app::{App, TaskKind, TaskPayload, TaskResult};
@@ -146,6 +147,18 @@ fn do_reset(app: &mut App) {
 }
 // </shared reset logic, keeps the existing gpu context alive>
 
+// <extract a readable message from a caught panic payload>
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "Unknown error (non-string panic payload).".to_string()
+    }
+}
+// </extract a readable message from a caught panic payload>
+
 // <poll background task, call once per frame before rendering>
 fn poll_task(app: &mut App, ctx: &egui::Context) {
     let result = if let Some(rx) = &app.task_rx {
@@ -158,6 +171,7 @@ fn poll_task(app: &mut App, ctx: &egui::Context) {
             Err(mpsc::TryRecvError::Disconnected) => {
                 app.task_rx = None;
                 app.task_label = None;
+                app.status = "Background task ended unexpectedly with no result.".into();
                 return;
             }
         }
@@ -226,12 +240,18 @@ fn poll_task(app: &mut App, ctx: &egui::Context) {
             app.status = format!("Done ({engine}) - {n} region(s) found. Click any region to select it.");
         }
 
+        // <surface background task failures to the status bar>
+        TaskPayload::Failed(msg) => {
+            app.status = format!("Task failed: {msg}");
+        }
+        // </surface background task failures to the status bar>
+
         TaskPayload::Filtered => {}
     }
 }
 // </poll background task, call once per frame before rendering>
 
-// <trigger load, shared by File menu and action row button>
+// <trigger load, wraps the thread body in catch_unwind so a panic reports instead of vanishing>
 fn trigger_load(app: &mut App, _ui: &mut egui::Ui) {
     if let Some(path) = FileDialog::new()
         .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "tiff", "webp"])
@@ -243,18 +263,33 @@ fn trigger_load(app: &mut App, _ui: &mut egui::Ui) {
         app.task_label = Some("Loading image".into());
 
         std::thread::spawn(move || {
-            if let Ok(img) = image::open(&path) {
+            let tx2 = tx.clone();
+            let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                let img = image::open(&path).map_err(|e| e.to_string())?;
                 let rgb = img.to_rgb8();
                 let prominent = compute_prominent_filters(&rgb, &filters, 0.05);
-                let _ = tx.send(TaskResult {
-                    kind: TaskKind::Loading,
-                    payload: TaskPayload::Loaded { image: img, rgb, prominent },
-                });
+                Ok::<_, String>((img, rgb, prominent))
+            }));
+
+            match result {
+                Ok(Ok((image, rgb, prominent))) => {
+                    let _ = tx2.send(TaskResult {
+                        kind: TaskKind::Loading,
+                        payload: TaskPayload::Loaded { image, rgb, prominent },
+                    });
+                }
+                Ok(Err(msg)) => {
+                    let _ = tx2.send(TaskResult { kind: TaskKind::Loading, payload: TaskPayload::Failed(msg) });
+                }
+                Err(panic_payload) => {
+                    let msg = panic_message(panic_payload);
+                    let _ = tx2.send(TaskResult { kind: TaskKind::Loading, payload: TaskPayload::Failed(msg) });
+                }
             }
         });
     }
 }
-// </trigger load, shared by File menu and action row button>
+// </trigger load, wraps the thread body in catch_unwind so a panic reports instead of vanishing>
 
 // <load button, action row>
 fn show_load_button(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui, busy: bool) {
@@ -336,24 +371,34 @@ fn show_segment_button(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui, b
             app.task_rx = Some(rx);
 
             std::thread::spawn(move || {
-                let processed = box_blur(&rgb, blur);
+                let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    let processed = box_blur(&rgb, blur);
 
-                let (labels, regions) = match engine {
-                    SegmentEngine::Exact => segment(&processed, tol, min_px, scale),
-                    SegmentEngine::Parallel => segment_parallel(&processed, tol, min_px, scale),
-                    SegmentEngine::Gpu => match &gpu_ctx {
-                        Some(ctx) => match gpu_compute_seg_edges(ctx, &processed, tol) {
-                            Some(edges) => segment_gpu(&processed, &edges, min_px, scale),
+                    match engine {
+                        SegmentEngine::Exact => segment(&processed, tol, min_px, scale),
+                        SegmentEngine::Parallel => segment_parallel(&processed, tol, min_px, scale),
+                        SegmentEngine::Gpu => match &gpu_ctx {
+                            Some(ctx) => match gpu_compute_seg_edges(ctx, &processed, tol) {
+                                Some(edges) => segment_gpu(&processed, &edges, min_px, scale),
+                                None => segment_parallel(&processed, tol, min_px, scale),
+                            },
                             None => segment_parallel(&processed, tol, min_px, scale),
                         },
-                        None => segment_parallel(&processed, tol, min_px, scale),
-                    },
-                };
+                    }
+                }));
 
-                let _ = tx.send(TaskResult {
-                    kind: TaskKind::Segmenting,
-                    payload: TaskPayload::Segmented { labels, regions },
-                });
+                match result {
+                    Ok((labels, regions)) => {
+                        let _ = tx.send(TaskResult {
+                            kind: TaskKind::Segmenting,
+                            payload: TaskPayload::Segmented { labels, regions },
+                        });
+                    }
+                    Err(panic_payload) => {
+                        let msg = panic_message(panic_payload);
+                        let _ = tx.send(TaskResult { kind: TaskKind::Segmenting, payload: TaskPayload::Failed(msg) });
+                    }
+                }
             });
         }
     }

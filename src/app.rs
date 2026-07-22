@@ -29,6 +29,9 @@ pub enum TaskPayload {
         regions: Vec<Region>,
     },
     Filtered,
+    // <failure payload, sent when the background thread panics>
+    Failed(String),
+    // </failure payload, sent when the background thread panics>
 }
 // </task state, what background work is currently running>
 
